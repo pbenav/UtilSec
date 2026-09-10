@@ -1,0 +1,38 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Runtime generated databases & state
+sentinel_history.db
+sentinel_history.db*
+*.db
+*.db-journal
+
+# Runtime generated scripts & logs
+sentinel.log
+*.log
+banned_ips.sh
+unban_ips.sh
+logs
+logs.zip
+*.zip
+*.tar.gz
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
