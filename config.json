@@ -1,0 +1,85 @@
+{
+  "log_file": "logs",
+  "firewall_backend": "auto",
+  "dry_run": true,
+  "default_ban_duration": 3600,
+  "threshold_404": 2,
+  "threshold_403": 1,
+  "window_seconds": 60,
+  "ban_subnet": true,
+  "subnet_cidr_ipv4": 24,
+  "subnet_cidr_ipv6": 64,
+  "whitelist": [
+    "127.0.0.1",
+    "::1",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16"
+  ],
+  "user_patterns": [
+    "/admin.php",
+    "/phpmyadmin",
+    "/pma",
+    "/wp-login.php",
+    "/xmlrpc.php"
+  ],
+  "heuristic_rules": [
+    {
+      "id": "env_leaks",
+      "name": "Environment / Config Leaks",
+      "pattern": "\\.env(\\.[a-zA-Z0-9_.-]+)?$|\\.aws/credentials|rclone\\.conf|\\.vscode/sftp\\.json|wp-config\\.php",
+      "is_regex": true,
+      "critical": true,
+      "category": "credentials"
+    },
+    {
+      "id": "git_leaks",
+      "name": "Git Repository Leak",
+      "pattern": "\\.git(/|$)|\\.gitignore|\\.DS_Store",
+      "is_regex": true,
+      "critical": true,
+      "category": "credentials"
+    },
+    {
+      "id": "webshells",
+      "name": "Known PHP WebShells & Backdoors",
+      "pattern": "(hellopress|wp_filemanager|this_is_a_new_hello_world|coffexium|alfa|cxs|wso|b374k|c99|r57|simattacker|c100)\\.php",
+      "is_regex": true,
+      "critical": true,
+      "category": "webshell"
+    },
+    {
+      "id": "traversal",
+      "name": "Path / Directory Traversal",
+      "pattern": "\\.\\./|\\.\\.%2f|@fs/|/etc/passwd|/proc/self",
+      "is_regex": true,
+      "critical": true,
+      "category": "traversal"
+    },
+    {
+      "id": "framework_exploits",
+      "name": "Framework & CVE Exploits",
+      "pattern": "actuator/|telescope/requests|debug/default/view|@vite/env|exporttool/microsoft\\.exchange|pom\\.properties|v2/_catalog|trace\\.axd|vendor/phpunit|solr/admin",
+      "is_regex": true,
+      "critical": true,
+      "category": "exploit"
+    },
+    {
+      "id": "cgi_exploit",
+      "name": "CGI-Bin Script Probe",
+      "pattern": "/cgi-bin/",
+      "is_regex": false,
+      "critical": true,
+      "category": "exploit"
+    },
+    {
+      "id": "param_fuzzing",
+      "name": "Parameter Injection & Bot Spam",
+      "pattern": "/\\?[a-zA-Z]=|/\\?[a-zA-Z]{3,}/[0-9]+|^/(shops|colombo|ittria|conglutinated|claimless|clapper)/|^/ip(/|\\.php)?$",
+      "is_regex": true,
+      "critical": true,
+      "category": "exploit"
+    }
+  ]
+}
+
