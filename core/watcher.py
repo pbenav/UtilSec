@@ -184,8 +184,8 @@ class LogWatcherManager:
     def __init__(self, on_request: Callable[..., None], default_replay_lines: int = 100):
         self.on_request = on_request
         self.default_replay_lines = default_replay_lines
-        self.watchers: dict[str, LogWatcher] = {}
-        self.threads: dict[str, Any] = {}
+        self.watchers: Dict[str, LogWatcher] = {}
+        self.threads: Dict[str, Any] = {}
         self.lock = __import__("threading").Lock()
         self.running = True
 
@@ -255,7 +255,7 @@ class LogWatcherManager:
         with self.lock:
             return self.watchers.get(name)
 
-    def get_all_watchers(self) -> list[LogWatcher]:
+    def get_all_watchers(self) -> List[LogWatcher]:
         with self.lock:
             return list(self.watchers.values())
 
