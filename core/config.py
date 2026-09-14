@@ -32,6 +32,18 @@ class ConfigManager:
 
         # Set default values if missing
         self.log_file = self.raw_config.get("log_file", "logs")
+        raw_log_files = self.raw_config.get("log_files", [])
+        self.log_files: List[Dict[str, str]] = []
+        if raw_log_files:
+            for item in raw_log_files:
+                if isinstance(item, dict) and "path" in item:
+                    name = item.get("name") or os.path.basename(item["path"])
+                    self.log_files.append({"name": name, "path": item["path"]})
+                elif isinstance(item, str):
+                    self.log_files.append({"name": os.path.basename(item), "path": item})
+        else:
+            self.log_files.append({"name": os.path.basename(self.log_file), "path": self.log_file})
+
         self.firewall_backend = self.raw_config.get("firewall_backend", "auto")
         self.dry_run = self.raw_config.get("dry_run", True)
         self.default_ban_duration = int(self.raw_config.get("default_ban_duration", 3600))
@@ -141,6 +153,30 @@ class ConfigManager:
             self.raw_config["user_patterns"] = patterns
             self.save()
             self._build_rules()
+            return True
+        return False
+
+    def add_log_file(self, name: str, path: str, persist: bool = False) -> bool:
+        """Add a log file to configuration."""
+        name = name.strip() or os.path.basename(path.strip())
+        path = path.strip()
+        for item in self.log_files:
+            if item["path"] == path or item["name"] == name:
+                return False
+        self.log_files.append({"name": name, "path": path})
+        if persist:
+            self.raw_config["log_files"] = self.log_files
+            self.save()
+        return True
+
+    def remove_log_file(self, name: str, persist: bool = False) -> bool:
+        """Remove a log file from configuration."""
+        new_list = [f for f in self.log_files if f["name"] != name and f["path"] != name]
+        if len(new_list) < len(self.log_files):
+            self.log_files = new_list
+            if persist:
+                self.raw_config["log_files"] = self.log_files
+                self.save()
             return True
         return False
 

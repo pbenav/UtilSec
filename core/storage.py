@@ -43,11 +43,22 @@ class StorageManager:
                     url TEXT,
                     status_code INTEGER,
                     matched_rule TEXT,
-                    category TEXT
+                    category TEXT,
+                    source_log TEXT
                 )
             """)
+            # Auto-migrate if source_log column does not exist
+            cursor.execute("PRAGMA table_info(events)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if "source_log" not in cols:
+                try:
+                    cursor.execute("ALTER TABLE events ADD COLUMN source_log TEXT")
+                except Exception:
+                    pass
+
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_ip ON events (ip)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_time ON events (timestamp)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_src ON events (source_log)")
             conn.commit()
 
     def save_ban(self, ban: BanRecord) -> None:
@@ -101,8 +112,8 @@ class StorageManager:
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO events (timestamp, ip, method, url, status_code, matched_rule, category)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO events (timestamp, ip, method, url, status_code, matched_rule, category, source_log)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 event.timestamp.timestamp(),
                 event.ip,
@@ -110,19 +121,28 @@ class StorageManager:
                 event.url,
                 event.status_code,
                 event.matched_rule,
-                event.category
+                event.category,
+                event.source_log
             ))
             conn.commit()
 
-    def load_recent_events(self, limit: int = 100) -> List[AttackEvent]:
+    def load_recent_events(self, limit: int = 100, source_log: Optional[str] = None) -> List[AttackEvent]:
         events = []
         with self._get_conn() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT timestamp, ip, method, url, status_code, matched_rule, category
-                FROM events
-                ORDER BY id DESC LIMIT ?
-            """, (limit,))
+            if source_log:
+                cursor.execute("""
+                    SELECT timestamp, ip, method, url, status_code, matched_rule, category, source_log
+                    FROM events
+                    WHERE source_log = ?
+                    ORDER BY id DESC LIMIT ?
+                """, (source_log, limit))
+            else:
+                cursor.execute("""
+                    SELECT timestamp, ip, method, url, status_code, matched_rule, category, source_log
+                    FROM events
+                    ORDER BY id DESC LIMIT ?
+                """, (limit,))
             for row in cursor.fetchall():
                 ev = AttackEvent(
                     timestamp=datetime.fromtimestamp(row[0]),
@@ -131,7 +151,8 @@ class StorageManager:
                     url=row[3],
                     status_code=row[4],
                     matched_rule=row[5],
-                    category=row[6]
+                    category=row[6],
+                    source_log=row[7] if len(row) > 7 and row[7] else ""
                 )
                 events.append(ev)
         return events

@@ -17,7 +17,7 @@ from core.detector import AttackDetector
 from core.firewall import FirewallManager
 from core.models import AttackEvent, BanRecord
 from core.storage import StorageManager
-from core.watcher import LogWatcher
+from core.watcher import LogWatcher, LogWatcherManager
 from ui.tui import SentinelTUI
 
 
@@ -36,7 +36,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="UtilSec Sentinel: Real-Time Web Server Attack Monitor & Firewall Auto-Ban"
     )
-    parser.add_argument("--log", "-l", help="Path to web server log file (default: from config or ./logs)")
+    parser.add_argument(
+        "--log", "-l", action="append",
+        help="Path to web server log file (can be specified multiple times, supports optional name=path format, e.g. -l site1=/var/log/site1.log)"
+    )
     parser.add_argument("--config", "-c", default="config.json", help="Path to configuration file")
     parser.add_argument("--dry-run", action="store_true", help="Force dry-run simulation mode")
     parser.add_argument("--live", action="store_true", help="Force live firewall mode (requires root/sudo)")
@@ -55,7 +58,17 @@ def main():
     # 1. Load configuration
     config = ConfigManager(config_path=args.config)
     if args.log:
-        config.log_file = args.log
+        config.log_files = []
+        for entry in args.log:
+            if "=" in entry:
+                name, path = entry.split("=", 1)
+            else:
+                path = entry
+                name = os.path.basename(path)
+            config.log_files.append({"name": name, "path": path})
+        if config.log_files:
+            config.log_file = config.log_files[0]["path"]
+
     if args.backend:
         config.firewall_backend = args.backend
     if args.ban_time:
@@ -101,10 +114,10 @@ def main():
     detector = AttackDetector(config=config)
 
     # 5. Handler for parsed requests
-    def on_request(ip: str, method: str, url: str, status: int, raw_line: str):
+    def on_request(ip: str, method: str, url: str, status: int, raw_line: str, source_log: str = "default"):
         try:
             event, should_ban, ban_reason = detector.analyze_request(
-                ip=ip, method=method, url=url, status_code=status, raw_line=raw_line
+                ip=ip, method=method, url=url, status_code=status, raw_line=raw_line, source_log=source_log
             )
 
             if event:
@@ -126,16 +139,24 @@ def main():
         except Exception as e:
             logger.error(f"Error processing request ({ip}, {method}, {url}): {e}")
 
-    # 6. Setup Log Watcher
-    if not os.path.exists(config.log_file):
-        print(f"[!] Log file '{config.log_file}' does not exist! Please check the path.")
+    # 6. Setup Log Watcher Manager
+    valid_logs = []
+    for item in config.log_files:
+        if os.path.exists(item["path"]):
+            valid_logs.append(item)
+        else:
+            print(f"[!] Warning: Log file '{item['path']}' does not exist (skipping initially).")
+
+    if not valid_logs:
+        print(f"[!] Error: None of the configured log files exist! Please check your paths.")
         sys.exit(1)
 
-    watcher = LogWatcher(
-        log_path=config.log_file,
+    watcher_mgr = LogWatcherManager(
         on_request=on_request,
-        replay_lines=args.replay,
+        default_replay_lines=args.replay,
     )
+    for item in valid_logs:
+        watcher_mgr.add_watcher(name=item["name"], path=item["path"], auto_start=False)
 
     is_tty = sys.stdout.isatty() and not args.headless
 
@@ -144,18 +165,17 @@ def main():
             config=config,
             detector=detector,
             firewall=firewall,
-            watcher=watcher,
+            watcher_manager=watcher_mgr,
             storage=storage,
         )
         tui_ref[0] = tui
 
-    # 7. Start Watcher thread
-    watcher_thread = threading.Thread(target=watcher.run, daemon=True)
-    watcher_thread.start()
+    # 7. Start Watchers
+    watcher_mgr.start_all()
 
     # 8. Run Headless or TUI
     def shutdown(sig=None, frame=None):
-        watcher.stop()
+        watcher_mgr.stop_all()
         firewall.stop()
         if tui_ref[0]:
             tui_ref[0].running = False
@@ -171,7 +191,9 @@ def main():
             shutdown()
     else:
         print(f"[*] UtilSec Sentinel running in HEADLESS mode.")
-        print(f"[*] Watching: {config.log_file}")
+        print(f"[*] Watching {len(valid_logs)} log file(s):")
+        for item in valid_logs:
+            print(f"    - [{item['name']}] {item['path']}")
         print(f"[*] Firewall: {'SIMULATION' if firewall.dry_run else firewall.active_backend.upper()}")
         print(f"[*] Ban duration: {config.default_ban_duration}s | 404 Threshold: {config.threshold_404}")
         print(f"[*] Press Ctrl+C to stop.\n")

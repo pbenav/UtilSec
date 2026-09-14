@@ -1,5 +1,11 @@
 {
   "log_file": "logs",
+  "log_files": [
+    {
+      "name": "Access Global",
+      "path": "/var/log/apache2/access.log"
+    }
+  ],
   "firewall_backend": "auto",
   "dry_run": true,
   "default_ban_duration": 3600,
@@ -14,7 +20,9 @@
     "::1",
     "10.0.0.0/8",
     "172.16.0.0/12",
-    "192.168.0.0/16"
+    "192.168.0.0/16",
+    "185.204.62.36/32",
+    "92.187.27.165/32"
   ],
   "user_patterns": [
     "/admin.php",
@@ -82,4 +90,3 @@
     }
   ]
 }
-

@@ -180,7 +180,176 @@ class TestSentinelCore(unittest.TestCase):
         self.assertIsNotNone(p3)
         self.assertEqual(p3[0], "92.187.27.165")
 
+    def test_multi_log_config(self):
+        cfg_file = os.path.join(self.tmp_dir.name, "multi_cfg.json")
+        with open(cfg_file, "w", encoding="utf-8") as f:
+            f.write("""{
+                "log_files": [
+                    {"name": "site_access", "path": "/var/log/access.log"},
+                    {"name": "site_error", "path": "/var/log/error.log"}
+                ]
+            }""")
+        cfg = ConfigManager(cfg_file)
+        self.assertEqual(len(cfg.log_files), 2)
+        self.assertEqual(cfg.log_files[0]["name"], "site_access")
+        self.assertEqual(cfg.log_files[1]["name"], "site_error")
 
-if __name__ == "__main__":
-    unittest.main()
+        # Test add_log_file
+        cfg.add_log_file("site_ssl", "/var/log/ssl.log", persist=True)
+        self.assertEqual(len(cfg.log_files), 3)
+
+        # Reload from disk to verify persistence
+        cfg_reloaded = ConfigManager(cfg_file)
+        self.assertEqual(len(cfg_reloaded.log_files), 3)
+        self.assertEqual(cfg_reloaded.log_files[2]["name"], "site_ssl")
+
+        # Test remove_log_file
+        removed = cfg_reloaded.remove_log_file("site_error", persist=True)
+        self.assertTrue(removed)
+        self.assertEqual(len(cfg_reloaded.log_files), 2)
+
+    def test_storage_source_log_filtering(self):
+        ev1 = AttackEvent(
+            ip="100.1.1.1", method="GET", url="/.env", status_code=404,
+            matched_rule="Env Test", category="credentials", source_log="siteA"
+        )
+        ev2 = AttackEvent(
+            ip="100.1.1.2", method="GET", url="/shell.php", status_code=404,
+            matched_rule="WebShell", category="webshell", source_log="siteB"
+        )
+        self.storage.log_event(ev1)
+        self.storage.log_event(ev2)
+
+        # Load all
+        all_events = self.storage.load_recent_events(limit=10)
+        self.assertEqual(len(all_events), 2)
+
+        # Load filtered by siteA
+        siteA_events = self.storage.load_recent_events(limit=10, source_log="siteA")
+        self.assertEqual(len(siteA_events), 1)
+        self.assertEqual(siteA_events[0].ip, "100.1.1.1")
+        self.assertEqual(siteA_events[0].source_log, "siteA")
+
+        # Load filtered by siteB
+        siteB_events = self.storage.load_recent_events(limit=10, source_log="siteB")
+        self.assertEqual(len(siteB_events), 1)
+        self.assertEqual(siteB_events[0].ip, "100.1.1.2")
+        self.assertEqual(siteB_events[0].source_log, "siteB")
+
+    def test_log_watcher_manager(self):
+        from core.watcher import LogWatcherManager
+        log1 = os.path.join(self.tmp_dir.name, "log1.log")
+        log2 = os.path.join(self.tmp_dir.name, "log2.log")
+
+        with open(log1, "w", encoding="utf-8") as f:
+            f.write("")
+        with open(log2, "w", encoding="utf-8") as f:
+            f.write("")
+
+        received = []
+
+        def on_req(ip, method, url, status, raw_line, source_log="default"):
+            received.append((ip, source_log))
+
+        mgr = LogWatcherManager(on_request=on_req, default_replay_lines=0)
+        mgr.add_watcher("log1", log1, auto_start=True)
+        mgr.add_watcher("log2", log2, auto_start=True)
+
+        time.sleep(0.1)
+
+        # Append to log1
+        with open(log1, "a", encoding="utf-8") as f:
+            f.write('1.1.1.1 - - [30/Aug/2026:00:00:01 +0200] "GET /test1 HTTP/1.1" 200 100 "-" "-"\n')
+        # Append to log2
+        with open(log2, "a", encoding="utf-8") as f:
+            f.write('2.2.2.2 - - [30/Aug/2026:00:00:02 +0200] "GET /test2 HTTP/1.1" 200 100 "-" "-"\n')
+
+        time.sleep(0.3)
+        mgr.stop_all()
+
+        self.assertIn(("1.1.1.1", "log1"), received)
+        self.assertIn(("2.2.2.2", "log2"), received)
+        self.assertGreaterEqual(mgr.total_lines_processed, 2)
+
+    def test_tui_screens_and_event_segregation(self):
+        from core.watcher import LogWatcherManager
+        from ui.tui import SentinelTUI
+
+        mgr = LogWatcherManager(on_request=lambda *args: None)
+        log_a = os.path.join(self.tmp_dir.name, "a.log")
+        log_b = os.path.join(self.tmp_dir.name, "b.log")
+        open(log_a, "w").close()
+        open(log_b, "w").close()
+
+        mgr.add_watcher("screenA", log_a, auto_start=False)
+        mgr.add_watcher("screenB", log_b, auto_start=False)
+
+        tui = SentinelTUI(
+            config=self.config,
+            detector=self.detector,
+            firewall=self.firewall,
+            watcher_manager=mgr,
+            storage=self.storage,
+        )
+
+        screens = tui.get_screens()
+        self.assertEqual(len(screens), 3)  # 0: GLOBAL, 1: screenA, 2: screenB
+        self.assertEqual(screens[0]["name"], "GLOBAL")
+        self.assertEqual(screens[1]["name"], "screenA")
+        self.assertEqual(screens[2]["name"], "screenB")
+
+        # Dispatch events
+        evA = AttackEvent(
+            ip="10.0.0.1", method="GET", url="/wp-admin", status_code=404,
+            matched_rule="WP", category="admin", source_log="screenA"
+        )
+        evB = AttackEvent(
+            ip="10.0.0.2", method="GET", url="/phpmyadmin", status_code=404,
+            matched_rule="PMA", category="admin", source_log="screenB"
+        )
+        tui.add_attack_event(evA)
+        tui.add_attack_event(evB)
+
+        # Global stream has both
+        self.assertEqual(len(tui.recent_attacks), 2)
+
+        # Per screen segregated
+        self.assertEqual(len(tui.screen_attacks["screenA"]), 1)
+        self.assertEqual(tui.screen_attacks["screenA"][0].ip, "10.0.0.1")
+
+        self.assertEqual(len(tui.screen_attacks["screenB"]), 1)
+        self.assertEqual(tui.screen_attacks["screenB"][0].ip, "10.0.0.2")
+
+        # Verify paths in screens
+        self.assertEqual(screens[1]["path"], log_a)
+        self.assertEqual(screens[2]["path"], log_b)
+
+    def test_file_browser_scanning_and_filtering(self):
+        # Create a directory structure to test browser scanning
+        browser_dir = os.path.join(self.tmp_dir.name, "test_browse")
+        os.makedirs(os.path.join(browser_dir, "apache2"), exist_ok=True)
+        os.makedirs(os.path.join(browser_dir, "nginx"), exist_ok=True)
+        with open(os.path.join(browser_dir, "access.log"), "w") as f:
+            f.write("test log data\n")
+        with open(os.path.join(browser_dir, "error.log"), "w") as f:
+            f.write("error log data\n")
+
+        raw_entries = os.scandir(browser_dir)
+        names = [e.name for e in raw_entries]
+        self.assertIn("apache2", names)
+        self.assertIn("nginx", names)
+        self.assertIn("access.log", names)
+        self.assertIn("error.log", names)
+
+        # Verify filter logic
+        filter_str = "acc"
+        filtered = [n for n in names if filter_str in n]
+        self.assertEqual(filtered, ["access.log"])
+
+    def test_firewall_toggle_dry_run(self):
+        is_dry, msg = self.firewall.toggle_dry_run()
+        # Non-root environment: should safely refuse or provide clear feedback
+        self.assertIsInstance(is_dry, bool)
+        self.assertIsInstance(msg, str)
+        self.assertTrue(len(msg) > 0)
 

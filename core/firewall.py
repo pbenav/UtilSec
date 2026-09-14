@@ -6,7 +6,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from core.models import BanRecord
 from core.storage import StorageManager
@@ -303,11 +303,29 @@ class FirewallManager:
             # Return sorted by banned_at desc
             return sorted(self.active_bans.values(), key=lambda r: r.banned_at, reverse=True)
 
-    def toggle_dry_run(self) -> bool:
-        """Toggle between dry-run and live system firewall mode."""
-        self.dry_run = not self.dry_run
-        self.active_backend = self._detect_backend()
-        if not self.dry_run:
+    def toggle_dry_run(self) -> Tuple[bool, str]:
+        """Toggle between dry-run and live system firewall mode.
+        Returns: (is_dry_run, message_description)
+        """
+        if self.dry_run:
+            # Want to switch to LIVE
+            is_root = os.geteuid() == 0
+            live_backend = None
+            pref = self.requested_backend.lower()
+            candidates = [pref] if pref in ("iptables", "ufw", "nft") else ["iptables", "ufw", "nft"]
+            for cand in candidates:
+                if shutil.which(cand) and (is_root or self._check_sudo(cand)):
+                    live_backend = cand
+                    break
+
+            if not live_backend:
+                return (
+                    True,
+                    "⚠️ Cannot switch to LIVE: Requires root/sudo! (Launch: sudo ./sentinel.py --live)",
+                )
+
+            self.dry_run = False
+            self.active_backend = live_backend
             with self.lock:
                 for record in self.active_bans.values():
                     if record.status == "SIMULATED":
@@ -316,7 +334,12 @@ class FirewallManager:
                         self._exec_ban_system(record)
                         if self.storage:
                             self.storage.save_ban(record)
-        return self.dry_run
+            return (False, f"Switched firewall mode to: LIVE ({self.active_backend.upper()})")
+        else:
+            # Switching from LIVE to SIMULATION
+            self.dry_run = True
+            self.active_backend = "dry-run"
+            return (True, "Switched firewall mode to: SIMULATION (Dry-run)")
 
     def stop(self) -> None:
         self.running = False
