@@ -174,11 +174,38 @@ def main():
     watcher_mgr.start_all()
 
     # 8. Run Headless or TUI
+    has_shutdown = [False]
+
     def shutdown(sig=None, frame=None):
+        if has_shutdown[0]:
+            return
+        has_shutdown[0] = True
+
         watcher_mgr.stop_all()
         firewall.stop()
         if tui_ref[0]:
             tui_ref[0].running = False
+
+        # Clear terminal screen cleanly and reset scrollback
+        sys.stdout.write("\033[H\033[2J\033[3J")
+        sys.stdout.flush()
+
+        active_bans = len(firewall.get_active_bans_list())
+        fw_status = "SIMULATION (Dry-run)" if firewall.dry_run else f"LIVE ({firewall.active_backend.upper()})"
+
+        print("=" * 64)
+        print("  🛡️  UtilSec Sentinel - Servicio detenido correctamente")
+        print("=" * 64)
+        print(f"  • Estado Cortafuegos:    {fw_status}")
+        print(f"  • Subredes/IPs Baneadas:  {active_bans}")
+        print(f"  • Ataques Detectados:     {detector.total_attacks_detected}")
+        print(f"  • Líneas Analizadas:      {detector.total_analyzed:,}")
+        print(f"  • Logs Monitorizados:     {len(valid_logs)}")
+        print(f"  • Base de datos:          sentinel_history.db")
+        if firewall.dry_run and active_bans > 0:
+            print(f"  • Script de reglas:       banned_ips.sh")
+        print("=" * 64)
+        print("  ¡Sesión finalizada con éxito! Hasta pronto.\n")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
@@ -187,7 +214,17 @@ def main():
     if is_tty:
         try:
             tui_ref[0].start()
-        finally:
+        except KeyboardInterrupt:
+            shutdown()
+        except Exception as e:
+            logger.exception("Error en TUI: %s", e)
+            watcher_mgr.stop_all()
+            firewall.stop()
+            import traceback
+            print("\n[!] Se produjo un error en la interfaz TUI:")
+            traceback.print_exc()
+            sys.exit(1)
+        else:
             shutdown()
     else:
         print(f"[*] UtilSec Sentinel running in HEADLESS mode.")
@@ -202,7 +239,6 @@ def main():
             while True:
                 time.sleep(1.0)
         except KeyboardInterrupt:
-            print("\n[*] Stopping Sentinel...")
             shutdown()
 
 

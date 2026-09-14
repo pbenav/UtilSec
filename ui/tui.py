@@ -107,15 +107,25 @@ class SentinelTUI:
             pass
 
     def _init_colors(self) -> None:
+        if not curses.has_colors():
+            return
         curses.start_color()
-        curses.use_default_colors()
-        curses.init_pair(self.C_DEFAULT, curses.COLOR_WHITE, -1)
-        curses.init_pair(self.C_HEADER, curses.COLOR_BLACK, curses.COLOR_CYAN)
-        curses.init_pair(self.C_ALERT, curses.COLOR_RED, -1)
-        curses.init_pair(self.C_WARN, curses.COLOR_YELLOW, -1)
-        curses.init_pair(self.C_SUCCESS, curses.COLOR_GREEN, -1)
-        curses.init_pair(self.C_INFO, curses.COLOR_CYAN, -1)
-        curses.init_pair(self.C_MUTED, curses.COLOR_BLUE, -1)
+        bg = -1
+        try:
+            curses.use_default_colors()
+        except Exception:
+            bg = curses.COLOR_BLACK
+
+        try:
+            curses.init_pair(self.C_DEFAULT, curses.COLOR_WHITE, bg)
+            curses.init_pair(self.C_HEADER, curses.COLOR_BLACK, curses.COLOR_CYAN)
+            curses.init_pair(self.C_ALERT, curses.COLOR_RED, bg)
+            curses.init_pair(self.C_WARN, curses.COLOR_YELLOW, bg)
+            curses.init_pair(self.C_SUCCESS, curses.COLOR_GREEN, bg)
+            curses.init_pair(self.C_INFO, curses.COLOR_CYAN, bg)
+            curses.init_pair(self.C_MUTED, curses.COLOR_BLUE, bg)
+        except Exception:
+            pass
 
     def _main_loop(self, stdscr) -> None:
         curses.curs_set(0)
