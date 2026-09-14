@@ -15,10 +15,12 @@ class AttackEvent:
     category: str
     timestamp: datetime = field(default_factory=datetime.now)
     raw_line: str = ""
+    source_log: str = ""
 
     def summary(self) -> str:
         time_str = self.timestamp.strftime("%H:%M:%S")
-        return f"[{time_str}] {self.ip} -> {self.method} {self.url} [{self.status_code}] ({self.matched_rule})"
+        src = f"[{self.source_log}] " if self.source_log else ""
+        return f"[{time_str}] {src}{self.ip} -> {self.method} {self.url} [{self.status_code}] ({self.matched_rule})"
 
 
 @dataclass

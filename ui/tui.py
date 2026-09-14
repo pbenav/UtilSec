@@ -5,43 +5,56 @@ import os
 import sys
 import time
 from collections import deque
-from typing import Any, Callable, Deque, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 from core.config import ConfigManager
 from core.detector import AttackDetector
 from core.firewall import FirewallManager
 from core.models import AttackEvent, BanRecord
 from core.storage import StorageManager
-from core.watcher import LogWatcher
+from core.watcher import LogWatcher, LogWatcherManager
 
 
 class SentinelTUI:
-    """Full-featured interactive curses dashboard for Sentinel."""
+    """Full-featured interactive curses dashboard for Sentinel with multi-screen monitoring."""
 
     def __init__(
         self,
         config: ConfigManager,
         detector: AttackDetector,
         firewall: FirewallManager,
-        watcher: LogWatcher,
+        watcher: Optional[LogWatcher] = None,
+        watcher_manager: Optional[LogWatcherManager] = None,
         storage: Optional[Any] = None,
     ):
         self.config = config
         self.detector = detector
         self.firewall = firewall
         self.watcher = watcher
+        self.watcher_manager = watcher_manager
         self.storage = storage
+
+        # Backwards compatibility: if only watcher is provided, wrap in manager
+        if not self.watcher_manager and self.watcher:
+            self.watcher_manager = LogWatcherManager(on_request=lambda *args: None)
+            self.watcher_manager.watchers[self.watcher.name] = self.watcher
 
         self.running = True
         self.paused = False
         self.view_mode = "split"  # "split", "bans", "stream"
-        self.recent_attacks: Deque[AttackEvent] = deque(maxlen=100)
+        self.recent_attacks: Deque[AttackEvent] = deque(maxlen=200)
+        self.screen_attacks: Dict[str, Deque[AttackEvent]] = {}
+        self.active_screen_idx = 0
 
         # Pre-load recent events from database so stream is never empty
         if self.storage:
             try:
-                for ev in self.storage.load_recent_events(limit=50):
+                for ev in self.storage.load_recent_events(limit=100):
                     self.recent_attacks.append(ev)
+                    if ev.source_log:
+                        if ev.source_log not in self.screen_attacks:
+                            self.screen_attacks[ev.source_log] = deque(maxlen=200)
+                        self.screen_attacks[ev.source_log].append(ev)
             except Exception:
                 pass
 
@@ -61,9 +74,23 @@ class SentinelTUI:
         self.C_INFO = 6
         self.C_MUTED = 7
 
+    def get_screens(self) -> List[Dict[str, Any]]:
+        """Returns the list of screens: Screen 0 is GLOBAL, followed by individual log screens."""
+        screens = [{"id": "global", "name": "GLOBAL", "watcher": None}]
+        if self.watcher_manager:
+            for name, w in self.watcher_manager.watchers.items():
+                screens.append({"id": name, "name": name, "watcher": w, "path": w.log_path})
+        elif self.watcher:
+            screens.append({"id": self.watcher.name, "name": self.watcher.name, "watcher": self.watcher, "path": self.watcher.log_path})
+        return screens
+
     def add_attack_event(self, event: AttackEvent) -> None:
         if not self.paused:
             self.recent_attacks.appendleft(event)
+            if event.source_log:
+                if event.source_log not in self.screen_attacks:
+                    self.screen_attacks[event.source_log] = deque(maxlen=200)
+                self.screen_attacks[event.source_log].appendleft(event)
 
     def set_status(self, msg: str) -> None:
         self.status_msg = msg
@@ -71,7 +98,6 @@ class SentinelTUI:
 
     def start(self) -> None:
         """Initializes curses and runs the event loop."""
-        # Ensure valid TERM
         if not os.environ.get("TERM") or os.environ.get("TERM") == "dumb":
             os.environ["TERM"] = "xterm-256color"
 
@@ -120,12 +146,31 @@ class SentinelTUI:
     def _draw_dashboard(self, stdscr, max_y: int, max_x: int) -> None:
         stdscr.erase()
 
+        screens = self.get_screens()
+        if self.active_screen_idx >= len(screens):
+            self.active_screen_idx = max(0, len(screens) - 1)
+
+        current_screen = screens[self.active_screen_idx]
+        is_global = (self.active_screen_idx == 0)
+
         # 1. Header (Line 0)
         mode_str = f"[SIMULATION]" if self.firewall.dry_run else f"[LIVE: {self.firewall.active_backend.upper()}]"
         mode_color = self.C_WARN if self.firewall.dry_run else self.C_ALERT
         title = " UTILSEC SENTINEL "
-        speed_str = f"{self.watcher.lines_per_sec:.0f} lines/s | File: {os.path.basename(self.watcher.log_path)}"
-        speed_str = f"{self.watcher.lines_per_sec:.1f} lines/s | File: {os.path.basename(self.watcher.log_path)}"
+
+        if is_global:
+            total_lps = (
+                self.watcher_manager.total_lines_per_sec
+                if self.watcher_manager
+                else (self.watcher.lines_per_sec if self.watcher else 0.0)
+            )
+            total_logs = len(self.watcher_manager.watchers) if self.watcher_manager else 1
+            speed_str = f"{total_lps:.1f} l/s (total) | {total_logs} logs active"
+        else:
+            w = current_screen.get("watcher")
+            w_lps = w.lines_per_sec if w else 0.0
+            log_fname = os.path.basename(w.log_path) if w else current_screen["name"]
+            speed_str = f"{w_lps:.1f} l/s | {log_fname}"
 
         stdscr.attron(curses.color_pair(self.C_HEADER) | curses.A_BOLD)
         stdscr.addstr(0, 0, " " * (max_x - 1))
@@ -133,29 +178,77 @@ class SentinelTUI:
         stdscr.attroff(curses.color_pair(self.C_HEADER) | curses.A_BOLD)
 
         stdscr.addstr(0, len(title) + 4, mode_str, curses.color_pair(mode_color) | curses.A_BOLD)
-        stdscr.addstr(0, max_x - len(speed_str) - 2, speed_str, curses.color_pair(self.C_DEFAULT))
+        if len(speed_str) < max_x - (len(title) + len(mode_str) + 6):
+            stdscr.addstr(0, max_x - len(speed_str) - 2, speed_str, curses.color_pair(self.C_DEFAULT))
 
-        # 2. Stat Cards (Lines 1-3)
+        # 2. Screens Tabs Bar (Line 1 - GNU screen / tmux style)
+        stdscr.addstr(1, 0, " " * (max_x - 1))
+        tab_x = 1
+        for idx, scr in enumerate(screens):
+            is_active = (idx == self.active_screen_idx)
+            star = "*" if is_active else ""
+            tab_label = f" [{idx}: {scr['name']}{star}] "
+            if tab_x + len(tab_label) >= max_x - 15:
+                stdscr.addstr(1, tab_x, ".. ", curses.color_pair(self.C_MUTED))
+                tab_x += 3
+                break
+
+            if is_active:
+                stdscr.addstr(1, tab_x, tab_label, curses.color_pair(self.C_INFO) | curses.A_REVERSE | curses.A_BOLD)
+            else:
+                stdscr.addstr(1, tab_x, tab_label, curses.color_pair(self.C_DEFAULT))
+            tab_x += len(tab_label) + 1
+
+        add_btn = "[+] Add Log"
+        if max_x - len(add_btn) - 2 > tab_x:
+            stdscr.addstr(1, max_x - len(add_btn) - 2, add_btn, curses.color_pair(self.C_SUCCESS) | curses.A_BOLD)
+
+        # 3. Stat Cards / File Path Line (Line 2)
         bans_list = self.firewall.get_active_bans_list()
         active_bans_count = len(bans_list)
         total_attacks = self.detector.total_attacks_detected
         total_404s = self.detector.total_404s
         total_scanned = self.detector.total_analyzed
 
-        stats_line = (
-            f" [ACTIVE BANS: {active_bans_count}]  "
-            f" [ATTACKS CAUGHT: {total_attacks}]  "
-            f" [404/403 ERRORS: {total_404s}]  "
-            f" [TOTAL SCANNED: {total_scanned}]  "
-            f" [PAUSED: {'YES' if self.paused else 'NO'}]"
-        )
-        stdscr.addstr(2, 1, stats_line[: max_x - 2], curses.color_pair(self.C_INFO) | curses.A_BOLD)
+        if is_global:
+            log_names = [s["name"] for s in screens if s["id"] != "global"]
+            names_summary = ", ".join(log_names)
+            if len(names_summary) > 28:
+                names_summary = names_summary[:25] + ".."
+            stats_line = (
+                f" [GLOBAL BANS: {active_bans_count}]  "
+                f" [ATTACKS: {total_attacks}]  "
+                f" [SCANNED: {total_scanned:,}]  "
+                f" [LOGS ({len(log_names)}): {names_summary or 'None'}]  "
+                f" [PAUSED: {'YES' if self.paused else 'NO'}]"
+            )
+            stdscr.addstr(2, 1, stats_line[: max_x - 2], curses.color_pair(self.C_INFO) | curses.A_BOLD)
+        else:
+            w = current_screen.get("watcher")
+            w_lines = w.lines_processed if w else 0
+            w_attacks = len(self.screen_attacks.get(current_screen["id"], []))
+            full_path = w.log_path if w else current_screen.get("path", current_screen["name"])
+
+            # Prominently display the exact log file path in Yellow/Bold
+            file_tag = f" 📄 FILE: {full_path} "
+            stats_rest = (
+                f"  [SPEED: {w_lps:.1f} l/s]  "
+                f"[LINES: {w_lines:,}]  "
+                f"[ATTACKS: {w_attacks}]  "
+                f"[BANS: {active_bans_count}]"
+            )
+
+            # Draw FILE tag first so it's always visible
+            stdscr.addstr(2, 1, file_tag[: max_x - 2], curses.color_pair(self.C_WARN) | curses.A_BOLD)
+            tag_len = len(file_tag) + 1
+            if tag_len < max_x - 2:
+                stdscr.addstr(2, tag_len, stats_rest[: max_x - tag_len - 1], curses.color_pair(self.C_INFO))
 
         # Separator (Line 3)
         stdscr.addstr(3, 0, "─" * (max_x - 1), curses.color_pair(self.C_MUTED))
 
-        # 3. Main Area (Line 4 to max_y - 4)
-        table_h = max_y - 8
+        # 4. Main Area (Lines 4 to max_y - 4)
+        table_h = max(1, max_y - 9)
 
         # Mode indicator in title bar
         view_label = f"[VIEW: {self.view_mode.upper()}]"
@@ -208,22 +301,41 @@ class SentinelTUI:
                 for y in range(4, max_y - 3):
                     stdscr.addstr(y, split_x, "│", curses.color_pair(self.C_MUTED))
 
-            # Stream Header
-            stdscr.addstr(4, start_x, " LIVE ATTACK STREAM ", curses.color_pair(self.C_INFO) | curses.A_BOLD)
-            attacks_to_show = list(self.recent_attacks)[:table_h]
+            # Stream Header showing current monitored log name
+            if is_global:
+                stream_title = " LIVE ATTACK STREAM [GLOBAL - ALL LOGS] "
+            else:
+                log_disp = os.path.basename(w.log_path) if w else current_screen["name"]
+                stream_title = f" LIVE ATTACK STREAM ── [{log_disp}] "
+            stdscr.addstr(4, start_x, stream_title[:stream_w], curses.color_pair(self.C_INFO) | curses.A_BOLD)
+
+            if is_global:
+                attacks_to_show = list(self.recent_attacks)[:table_h]
+            else:
+                attacks_to_show = list(self.screen_attacks.get(current_screen["id"], []))[:table_h]
 
             if not attacks_to_show:
-                stdscr.addstr(7, start_x, "Waiting for attack events in log...", curses.color_pair(self.C_MUTED))
+                empty_msg = (
+                    "Waiting for attack events in logs..."
+                    if is_global
+                    else f"Waiting for attack events in {current_screen['name']}..."
+                )
+                stdscr.addstr(7, start_x, empty_msg, curses.color_pair(self.C_MUTED))
             else:
                 for row_i, ev in enumerate(attacks_to_show):
                     y = 6 + row_i
                     t_str = ev.timestamp.strftime("%H:%M:%S")
-                    txt = f"{t_str} [{ev.ip}] {ev.method} {ev.url}"
+                    src_tag = f"[{ev.source_log}] " if is_global and ev.source_log and ev.source_log != "default" else ""
+                    txt = f"{t_str} {src_tag}[{ev.ip}] {ev.method} {ev.url}"
                     tag = f"({ev.matched_rule})"
                     if len(txt) + len(tag) + 2 > stream_w:
                         txt = txt[: max(10, stream_w - len(tag) - 3)] + ".."
                     disp = f"{txt:<{stream_w - len(tag) - 1}} {tag}"[:stream_w]
-                    color = self.C_ALERT if ev.category in ("credentials", "webshell", "traversal", "rate_limit") else self.C_WARN
+                    color = (
+                        self.C_ALERT
+                        if ev.category in ("credentials", "webshell", "traversal", "rate_limit")
+                        else self.C_WARN
+                    )
                     stdscr.addstr(y, start_x, disp, curses.color_pair(color))
 
         # Separator before status bar
@@ -233,14 +345,381 @@ class SentinelTUI:
         stdscr.addstr(max_y - 2, 1, f"STATUS: {self.status_msg}"[: max_x - 2], curses.color_pair(self.C_INFO))
 
         # Hotkeys Bar (Line max_y - 1)
-        help_bar = "[Q]uit  [Tab/V]iew  [U]nban  [B]an IP  [A]dd Rule  [M]ode  [P]ause  [C]lear  [↑/↓] Nav"
+        help_bar = "[Q]uit [0-9/[]]Screen [Tab/V]iew [M]ode(Live/Sim) [+]Add Log [-]Del [U]nban [B]an [A]Rule [P]ause"
         stdscr.addstr(max_y - 1, 0, help_bar[: max_x - 1], curses.color_pair(self.C_HEADER) | curses.A_BOLD)
 
         stdscr.refresh()
 
+    def _browse_file(self, stdscr, initial_dir: Optional[str] = None) -> Optional[str]:
+        """Interactive modal file browser for selecting log files in curses."""
+        # Determine starting directory
+        current_dir = None
+        if initial_dir and os.path.isdir(initial_dir):
+            current_dir = os.path.abspath(initial_dir)
+        elif self.watcher_manager and self.watcher_manager.watchers:
+            first_w = next(iter(self.watcher_manager.watchers.values()), None)
+            if first_w and os.path.isdir(os.path.dirname(first_w.log_path)):
+                current_dir = os.path.dirname(os.path.abspath(first_w.log_path))
+        if not current_dir:
+            if os.path.isdir("/var/log"):
+                current_dir = "/var/log"
+            else:
+                current_dir = os.getcwd()
+
+        def _format_size(size_bytes: int) -> str:
+            if size_bytes < 1024:
+                return f"{size_bytes} B"
+            elif size_bytes < 1024 * 1024:
+                return f"{size_bytes / 1024:.1f} KB"
+            elif size_bytes < 1024 * 1024 * 1024:
+                return f"{size_bytes / (1024 * 1024):.1f} MB"
+            else:
+                return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+
+        def _scan_dir(path: str, filter_str: str) -> Tuple[List[Tuple[str, bool, int]], Optional[str]]:
+            try:
+                raw_entries = os.scandir(path)
+                dirs = []
+                files = []
+                for e in raw_entries:
+                    try:
+                        name = e.name
+                        if name.startswith(".") and name != "..":
+                            continue
+                        if filter_str and filter_str.lower() not in name.lower():
+                            continue
+                        if e.is_dir(follow_symlinks=True):
+                            dirs.append((name, True, 0))
+                        else:
+                            try:
+                                size = e.stat().st_size
+                            except Exception:
+                                size = 0
+                            files.append((name, False, size))
+                    except (PermissionError, FileNotFoundError):
+                        continue
+                dirs.sort(key=lambda x: x[0].lower())
+                files.sort(key=lambda x: x[0].lower())
+                parent_entry = []
+                parent_dir = os.path.dirname(os.path.abspath(path))
+                if parent_dir != os.path.abspath(path):
+                    parent_entry = [("..", True, 0)]
+                return parent_entry + dirs + files, None
+            except PermissionError:
+                return [], "Permission Denied: Unable to read directory"
+            except Exception as ex:
+                return [], str(ex)
+
+        filter_text = ""
+        selected_idx = 0
+        scroll_offset = 0
+        status_err = ""
+
+        stdscr.timeout(-1)  # blocking input for modal
+        curses.curs_set(0)
+
+        while True:
+            max_y, max_x = stdscr.getmaxyx()
+            if max_y < 16 or max_x < 65:
+                stdscr.timeout(100)
+                return None
+
+            entries, scan_err = _scan_dir(current_dir, filter_text)
+            if scan_err:
+                status_err = scan_err
+
+            if selected_idx >= len(entries):
+                selected_idx = max(0, len(entries) - 1)
+
+            win_h = max(14, min(22, max_y - 2))
+            win_w = max(58, min(80, max_x - 4))
+            win_y = max(0, (max_y - win_h) // 2)
+            win_x = max(0, (max_x - win_w) // 2)
+            content_h = win_h - 7
+
+            if selected_idx < scroll_offset:
+                scroll_offset = selected_idx
+            elif selected_idx >= scroll_offset + content_h:
+                scroll_offset = selected_idx - content_h + 1
+
+            # Fill modal background
+            for r in range(win_h):
+                stdscr.addstr(win_y + r, win_x, " " * (win_w - 1), curses.color_pair(self.C_DEFAULT))
+
+            # Top border + Title
+            border_top = "┌" + ("─" * (win_w - 3)) + "┐"
+            stdscr.addstr(win_y, win_x, border_top[: win_w - 1], curses.color_pair(self.C_INFO))
+            title = " SELECT LOG FILE (FILE BROWSER) "
+            if len(title) < win_w - 4:
+                stdscr.addstr(
+                    win_y,
+                    win_x + (win_w - len(title)) // 2,
+                    title,
+                    curses.color_pair(self.C_HEADER) | curses.A_BOLD,
+                )
+
+            # Line 1: Current Directory Path
+            path_display = f" Path: {current_dir}"
+            if len(path_display) > win_w - 4:
+                path_display = " Path: .." + path_display[-(win_w - 10):]
+            stdscr.addstr(win_y + 1, win_x, "│", curses.color_pair(self.C_INFO))
+            stdscr.addstr(win_y + 1, win_x + 1, path_display[: win_w - 3], curses.color_pair(self.C_WARN) | curses.A_BOLD)
+            stdscr.addstr(win_y + 1, win_x + win_w - 2, "│", curses.color_pair(self.C_INFO))
+
+            # Line 2: Filter input
+            filter_disp = f" Filter: [{filter_text}]"
+            stdscr.addstr(win_y + 2, win_x, "│", curses.color_pair(self.C_INFO))
+            stdscr.addstr(win_y + 2, win_x + 1, filter_disp[: win_w - 3], curses.color_pair(self.C_DEFAULT))
+            tip = "(Type to filter, Tab auto)"
+            if len(filter_disp) + len(tip) + 4 < win_w:
+                stdscr.addstr(win_y + 2, win_x + win_w - len(tip) - 3, tip, curses.color_pair(self.C_MUTED))
+            stdscr.addstr(win_y + 2, win_x + win_w - 2, "│", curses.color_pair(self.C_INFO))
+
+            # Line 3: Separator
+            border_sep = "├" + ("─" * (win_w - 3)) + "┤"
+            stdscr.addstr(win_y + 3, win_x, border_sep[: win_w - 1], curses.color_pair(self.C_INFO))
+
+            # Lines 4 to 4 + content_h: Directory entries
+            visible_entries = entries[scroll_offset : scroll_offset + content_h]
+            for row_i in range(content_h):
+                curr_y = win_y + 4 + row_i
+                stdscr.addstr(curr_y, win_x, "│", curses.color_pair(self.C_INFO))
+                stdscr.addstr(curr_y, win_x + win_w - 2, "│", curses.color_pair(self.C_INFO))
+
+                if row_i < len(visible_entries):
+                    abs_i = scroll_offset + row_i
+                    name, is_dir, size = visible_entries[row_i]
+                    is_sel = (abs_i == selected_idx)
+
+                    if is_dir:
+                        icon = "📁 "
+                        disp_name = ".. (Up one level)" if name == ".." else f"{name}/"
+                        size_str = "<DIR>"
+                        entry_color = self.C_INFO
+                    else:
+                        icon = "📄 "
+                        disp_name = name
+                        size_str = _format_size(size)
+                        entry_color = (
+                            self.C_SUCCESS
+                            if any(name.endswith(s) for s in (".log", "_log", ".txt"))
+                            else self.C_DEFAULT
+                        )
+
+                    avail_w = win_w - 4
+                    name_max = max(10, avail_w - len(size_str) - 6)
+                    if len(disp_name) > name_max:
+                        disp_name = disp_name[: name_max - 2] + ".."
+                    row_text = f" {icon}{disp_name:<{name_max}}  {size_str:>8} "
+                    row_text = row_text[:avail_w].ljust(avail_w)
+
+                    attr = curses.A_REVERSE if is_sel else curses.A_NORMAL
+                    if is_sel:
+                        stdscr.addstr(curr_y, win_x + 1, row_text, curses.color_pair(entry_color) | attr | curses.A_BOLD)
+                    else:
+                        stdscr.addstr(curr_y, win_x + 1, row_text, curses.color_pair(entry_color) | attr)
+
+            # Line win_h - 3: Separator
+            stdscr.addstr(win_y + win_h - 3, win_x, border_sep[: win_w - 1], curses.color_pair(self.C_INFO))
+
+            # Line win_h - 2: Status / Selection preview
+            stdscr.addstr(win_y + win_h - 2, win_x, "│", curses.color_pair(self.C_INFO))
+            stdscr.addstr(win_y + win_h - 2, win_x + win_w - 2, "│", curses.color_pair(self.C_INFO))
+            if status_err:
+                err_msg = f" ! {status_err}"
+                stdscr.addstr(win_y + win_h - 2, win_x + 1, err_msg[: win_w - 3], curses.color_pair(self.C_ALERT) | curses.A_BOLD)
+            elif entries and 0 <= selected_idx < len(entries):
+                sel_item = entries[selected_idx]
+                if sel_item[1]:
+                    sel_msg = f" Folder: {sel_item[0]}"
+                else:
+                    sel_msg = f" Target: {os.path.join(current_dir, sel_item[0])}"
+                stdscr.addstr(win_y + win_h - 2, win_x + 1, sel_msg[: win_w - 3], curses.color_pair(self.C_MUTED))
+
+            # Line win_h - 1: Bottom Help Bar
+            help_text = "[↑/↓] Move [Enter] Pick [←/BS] Up [Tab] Auto [G] Path [Esc] Cancel"
+            border_bot = "└" + ("─" * (win_w - 3)) + "┘"
+            stdscr.addstr(win_y + win_h - 1, win_x, border_bot[: win_w - 1], curses.color_pair(self.C_INFO))
+            if len(help_text) < win_w - 4:
+                stdscr.addstr(
+                    win_y + win_h - 1,
+                    win_x + (win_w - len(help_text)) // 2,
+                    help_text,
+                    curses.color_pair(self.C_HEADER) | curses.A_BOLD,
+                )
+
+            stdscr.refresh()
+
+            # Handle Keypress
+            ch = stdscr.getch()
+            if ch in (27,):  # Escape
+                stdscr.timeout(100)
+                return None
+
+            elif ch == curses.KEY_UP:
+                if selected_idx > 0:
+                    selected_idx -= 1
+                status_err = ""
+
+            elif ch == curses.KEY_DOWN:
+                if selected_idx < len(entries) - 1:
+                    selected_idx += 1
+                status_err = ""
+
+            elif ch in (curses.KEY_PPAGE,):
+                selected_idx = max(0, selected_idx - content_h)
+                status_err = ""
+
+            elif ch in (curses.KEY_NPAGE,):
+                selected_idx = min(max(0, len(entries) - 1), selected_idx + content_h)
+                status_err = ""
+
+            elif ch in (curses.KEY_ENTER, 10, 13):
+                status_err = ""
+                if entries and 0 <= selected_idx < len(entries):
+                    name, is_dir, _ = entries[selected_idx]
+                    if is_dir:
+                        if name == "..":
+                            current_dir = os.path.dirname(os.path.abspath(current_dir))
+                        else:
+                            current_dir = os.path.abspath(os.path.join(current_dir, name))
+                        filter_text = ""
+                        selected_idx = 0
+                        scroll_offset = 0
+                    else:
+                        chosen = os.path.abspath(os.path.join(current_dir, name))
+                        stdscr.timeout(100)
+                        return chosen
+
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                status_err = ""
+                if filter_text:
+                    filter_text = filter_text[:-1]
+                    selected_idx = 0
+                    scroll_offset = 0
+                else:
+                    parent = os.path.dirname(os.path.abspath(current_dir))
+                    if parent != os.path.abspath(current_dir):
+                        current_dir = parent
+                        selected_idx = 0
+                        scroll_offset = 0
+
+            elif ch == curses.KEY_LEFT:
+                status_err = ""
+                parent = os.path.dirname(os.path.abspath(current_dir))
+                if parent != os.path.abspath(current_dir):
+                    current_dir = parent
+                    filter_text = ""
+                    selected_idx = 0
+                    scroll_offset = 0
+
+            elif ch == ord("\t"):
+                # Tab autocomplete
+                candidates = [name for name, _, _ in entries if name != ".."]
+                if candidates:
+                    if len(candidates) == 1:
+                        c_name = candidates[0]
+                        c_isdir = entries[[e[0] for e in entries].index(c_name)][1]
+                        if c_isdir:
+                            current_dir = os.path.abspath(os.path.join(current_dir, c_name))
+                            filter_text = ""
+                            selected_idx = 0
+                            scroll_offset = 0
+                        else:
+                            filter_text = c_name
+                    else:
+                        common = os.path.commonprefix(candidates)
+                        if len(common) > len(filter_text):
+                            filter_text = common
+
+            elif ch in (ord("g"), ord("G")):
+                # Direct path prompt
+                manual = self._prompt_input(stdscr, "Enter manual file or directory path: ")
+                if manual:
+                    manual = os.path.expanduser(manual.strip())
+                    if os.path.isfile(manual):
+                        stdscr.timeout(100)
+                        return os.path.abspath(manual)
+                    elif os.path.isdir(manual):
+                        current_dir = os.path.abspath(manual)
+                        filter_text = ""
+                        selected_idx = 0
+                        scroll_offset = 0
+                        status_err = ""
+                    else:
+                        status_err = f"Path not found: {manual}"
+
+            elif 32 <= ch <= 126:
+                filter_text += chr(ch)
+                selected_idx = 0
+                scroll_offset = 0
+                status_err = ""
+
     def _handle_key(self, stdscr, key: int) -> None:
+        screens = self.get_screens()
+
         if key in (ord("q"), ord("Q")):
             self.running = False
+
+        elif ord("0") <= key <= ord("9"):
+            # Direct screen jump (0 = Global, 1..N = log screens)
+            idx = key - ord("0")
+            if idx < len(screens):
+                self.active_screen_idx = idx
+                self.set_status(f"Switched to screen {idx}: {screens[idx]['name']}")
+            else:
+                self.set_status(f"Screen {idx} does not exist (max: {len(screens) - 1})")
+
+        elif key in (ord("]"), ord("n"), ord("N"), curses.KEY_RIGHT):
+            # Next screen
+            if screens:
+                self.active_screen_idx = (self.active_screen_idx + 1) % len(screens)
+                self.set_status(f"Switched to screen {self.active_screen_idx}: {screens[self.active_screen_idx]['name']}")
+
+        elif key in (ord("["), curses.KEY_LEFT):
+            # Previous screen
+            if screens:
+                self.active_screen_idx = (self.active_screen_idx - 1) % len(screens)
+                self.set_status(f"Switched to screen {self.active_screen_idx}: {screens[self.active_screen_idx]['name']}")
+
+        elif key in (ord("+"), ord("o"), ord("O")):
+            # Dynamically add log file using the interactive file browser
+            selected_path = self._browse_file(stdscr)
+            if selected_path:
+                default_alias = os.path.basename(selected_path)
+                alias = self._prompt_input(stdscr, f"Screen alias (default: {default_alias}): ")
+                alias = alias.strip() if alias else default_alias
+                if not alias:
+                    alias = default_alias
+
+                if self.watcher_manager and alias in self.watcher_manager.watchers:
+                    self.set_status(f"Screen '{alias}' is already being monitored.")
+                else:
+                    if self.watcher_manager:
+                        self.watcher_manager.add_watcher(name=alias, path=selected_path, auto_start=True)
+                    self.config.add_log_file(alias, selected_path, persist=True)
+                    new_screens = self.get_screens()
+                    for idx, scr in enumerate(new_screens):
+                        if scr["name"] == alias:
+                            self.active_screen_idx = idx
+                            break
+                    self.set_status(f"Added and switched to: {alias} ({selected_path})")
+            else:
+                self.set_status("Log file selection cancelled.")
+
+        elif key in (ord("-"), ord("x"), ord("X")):
+            # Close current screen (disallowed on screen 0)
+            if self.active_screen_idx == 0:
+                self.set_status("Cannot close Screen 0 (GLOBAL).")
+            elif self.active_screen_idx < len(screens):
+                cur_name = screens[self.active_screen_idx]["name"]
+                confirm = self._prompt_input(stdscr, f"Close screen '{cur_name}'? (y/N): ")
+                if confirm.lower() in ("y", "yes"):
+                    if self.watcher_manager:
+                        self.watcher_manager.remove_watcher(cur_name)
+                    self.config.remove_log_file(cur_name, persist=True)
+                    self.active_screen_idx = 0
+                    self.set_status(f"Closed screen '{cur_name}'. Switched to GLOBAL.")
 
         elif key in (ord("\t"), ord("v"), ord("V")):
             # Cycle view mode
@@ -297,9 +776,8 @@ class SentinelTUI:
 
         elif key in (ord("m"), ord("M")):
             # Toggle dry-run / live mode
-            is_dry = self.firewall.toggle_dry_run()
-            mode_name = "SIMULATION (Dry-run)" if is_dry else f"LIVE ({self.firewall.active_backend})"
-            self.set_status(f"Switched firewall mode to: {mode_name}")
+            is_dry, status_msg = self.firewall.toggle_dry_run()
+            self.set_status(status_msg)
 
         elif key in (ord("p"), ord("P")):
             self.paused = not self.paused
@@ -352,4 +830,3 @@ class SentinelTUI:
         curses.curs_set(0)
         stdscr.timeout(100)
         return "".join(buf).strip()
-

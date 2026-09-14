@@ -50,6 +50,7 @@ class AttackDetector:
         url: str,
         status_code: int,
         raw_line: str = "",
+        source_log: str = "",
     ) -> Tuple[Optional[AttackEvent], bool, str]:
         """
         Analyzes an HTTP request.
@@ -87,6 +88,7 @@ class AttackDetector:
                     matched_rule=rule.name,
                     category=rule.category,
                     raw_line=raw_line,
+                    source_log=source_log,
                 )
                 # If rule is critical or status is 404/403/500, ban immediately!
                 if rule.critical or status_code in (404, 403):
@@ -112,6 +114,7 @@ class AttackDetector:
                     matched_rule="HTTP 403 Forbidden Access",
                     category="forbidden",
                     raw_line=raw_line,
+                    source_log=source_log,
                 )
                 reason = f"HTTP 403 Forbidden ({count} hit{'s' if count > 1 else ''})"
                 history.clear()
@@ -125,6 +128,7 @@ class AttackDetector:
                     matched_rule=f"HTTP 403 Probe ({count}/{self.config.threshold_403})",
                     category="probe",
                     raw_line=raw_line,
+                    source_log=source_log,
                 )
                 return event, False, ""
 
@@ -147,6 +151,7 @@ class AttackDetector:
                     matched_rule="HTTP 404 Scanner Rate-Limit",
                     category="rate_limit",
                     raw_line=raw_line,
+                    source_log=source_log,
                 )
                 reason = f"Exceeded 404 limit: {count} hits in {self.config.window_seconds}s"
                 history.clear()
@@ -160,6 +165,7 @@ class AttackDetector:
                     matched_rule=f"HTTP 404 Probe ({count}/{self.config.threshold_404})",
                     category="probe",
                     raw_line=raw_line,
+                    source_log=source_log,
                 )
                 return event, False, ""
 
