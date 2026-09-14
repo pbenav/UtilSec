@@ -3,7 +3,7 @@
 import ipaddress
 import json
 import os
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Union
 
 from core.models import Rule
 
@@ -15,7 +15,7 @@ class ConfigManager:
         self.config_path = config_path
         self.raw_config: Dict[str, Any] = {}
         self.rules: List[Rule] = []
-        self.whitelist_networks: List[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+        self.whitelist_networks: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]] = []
         self.load()
 
     def load(self) -> None:
