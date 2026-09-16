@@ -355,7 +355,7 @@ class SentinelTUI:
         stdscr.addstr(max_y - 2, 1, f"STATUS: {self.status_msg}"[: max_x - 2], curses.color_pair(self.C_INFO))
 
         # Hotkeys Bar (Line max_y - 1)
-        help_bar = "[Q]uit [0-9/[]]Screen [Tab/V]iew [M]ode(Live/Sim) [+]Add Log [-]Del [U]nban [B]an [A]Rule [P]ause [I]Info"
+        help_bar = "[Q]uit [0-9/[]]Screen [Tab/V]iew [M]ode(Live/Sim) [u]nban [U]nban IP [-]Del [B]an [A]Rule [P]ause [I]Info"
         stdscr.addstr(max_y - 1, 0, help_bar[: max_x - 1], curses.color_pair(self.C_HEADER) | curses.A_BOLD)
 
         # Watermark / branding in bottom-right corner
@@ -757,8 +757,8 @@ class SentinelTUI:
             if self.selected_idx < bans_count - 1:
                 self.selected_idx += 1
 
-        elif key in (ord("u"), ord("U")):
-            # Unban currently selected IP
+        elif key == ord("u"):
+            # Unban currently selected IP from active list
             bans = self.firewall.get_active_bans_list()
             if bans and 0 <= self.selected_idx < len(bans):
                 target_ip = bans[self.selected_idx].ip
@@ -766,6 +766,16 @@ class SentinelTUI:
                 self.set_status(f"Unbanned IP: {target_ip}")
             else:
                 self.set_status("No IP selected to unban.")
+
+        elif key == ord("U"):
+            # Unban any IP or subnet (even if not in active list)
+            inp = self._prompt_input(stdscr, "Enter IP or Subnet to UNBAN (e.g. 1.2.3.4 or 1.2.3.0/24): ")
+            if inp:
+                result = self.firewall.unban_ip(inp, manual=True)
+                if result:
+                    self.set_status(f"Unbanned: {inp}")
+                else:
+                    self.set_status(f"No active ban found for: {inp}")
 
         elif key in (ord("b"), ord("B")):
             # Manual ban modal
