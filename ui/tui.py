@@ -362,7 +362,7 @@ class SentinelTUI:
                     disp = f"{txt:<{stream_w - len(tag) - 1}} {tag}"[:stream_w]
                     color = (
                         self.C_ALERT
-                        if ev.category in ("credentials", "webshell", "traversal", "rate_limit")
+                        if ev.category in ("credentials", "webshell", "traversal", "rate_limit", "heuristic")
                         else self.C_WARN
                     )
                     stdscr.addstr(y, start_x, disp, curses.color_pair(color))
