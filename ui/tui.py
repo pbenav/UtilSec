@@ -772,7 +772,7 @@ class SentinelTUI:
                 self.selected_idx -= 1
 
         elif key == curses.KEY_DOWN:
-            bans_count = len(self.firewall.active_bans)
+            bans_count = len(self.firewall.get_active_bans_list())
             if self.selected_idx < bans_count - 1:
                 self.selected_idx += 1
 
