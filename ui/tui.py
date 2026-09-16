@@ -374,7 +374,7 @@ class SentinelTUI:
         stdscr.addstr(max_y - 2, 1, f"STATUS: {self.status_msg}"[: max_x - 2], curses.color_pair(self.C_INFO))
 
         # Hotkeys Bar (Line max_y - 1)
-        help_bar = "[Q]uit [0-9/[]]Screen [Tab/V]iew [M]ode(Live/Sim) [u]nban [U]xternal Rules [-]Del [B]an [A]Rule [P]ause [I]Info"
+        help_bar = "[Q]uit [0-9/[]]Screen [Tab/V]iew [M]ode(Live/Sim) [u]nban [U]xternal Rules [-]Del [B]an [A]Rule [D]elRule [P]ause [I]Info"
         stdscr.addstr(max_y - 1, 0, help_bar[: max_x - 1], curses.color_pair(self.C_HEADER) | curses.A_BOLD)
 
         # Watermark / branding in bottom-right corner
@@ -813,6 +813,86 @@ class SentinelTUI:
                     self.set_status(f"Added and saved rule: {pattern}")
                 else:
                     self.set_status(f"Rule already exists: {pattern}")
+
+        elif key in (ord("d"), ord("D")):
+            # Remove custom attack rule
+            user_patterns = self.config.raw_config.get("user_patterns", [])
+            if not user_patterns:
+                self.set_status("No user-defined rules to remove.")
+                return
+
+            max_y, max_x = stdscr.getmaxyx()
+            if max_y < 12 or max_x < 50:
+                self.set_status("Screen too small for rule list.")
+                return
+
+            selected_idx = 0
+            scroll_offset = 0
+
+            while True:
+                stdscr.timeout(200)
+                max_y, max_x = stdscr.getmaxyx()
+                if max_y < 12 or max_x < 50:
+                    self.set_status("Screen too small for rule list.")
+                    break
+
+                modal_h = min(len(user_patterns) + 8, max_y - 4)
+                modal_y = max(0, (max_y - modal_h) // 2)
+                modal_x = max(0, (max_x - 50) // 2)
+
+                # Clear modal area
+                for r in range(max_y):
+                    stdscr.addstr(r, 0, " " * (max_x - 1))
+
+                stdscr.addstr(modal_y, modal_x, " REMOVE USER RULE ", curses.color_pair(self.C_ALERT) | curses.A_BOLD)
+                stdscr.addstr(modal_y + 1, modal_x, "─" * 48, curses.color_pair(self.C_ALERT))
+
+                display_count = min(len(user_patterns), modal_h - 5)
+                if display_count < 1:
+                    display_count = 1
+
+                if selected_idx < scroll_offset:
+                    scroll_offset = selected_idx
+                elif selected_idx >= scroll_offset + display_count:
+                    scroll_offset = selected_idx - display_count + 1
+
+                for i in range(display_count):
+                    list_idx = scroll_offset + i
+                    if list_idx >= len(user_patterns):
+                        break
+                    y = modal_y + 2 + i
+                    idx_str = f"  {list_idx + 1:>3}. "
+                    line = f"{idx_str}{user_patterns[list_idx]}"[:max_x - modal_x - 2]
+                    if list_idx == selected_idx:
+                        stdscr.addstr(y, modal_x, line[:max_x - modal_x - 1], curses.color_pair(self.C_ALERT) | curses.A_REVERSE | curses.A_BOLD)
+                    else:
+                        stdscr.addstr(y, modal_x, line[:max_x - modal_x - 1], curses.color_pair(self.C_DEFAULT))
+
+                footer_y = modal_y + display_count + 2
+                if footer_y < max_y - 1:
+                    stdscr.addstr(footer_y, modal_x, " [Enter] Remove   [Esc] Cancel ", curses.color_pair(self.C_WARN))
+
+                stdscr.refresh()
+
+                key = stdscr.getch()
+                if key in (curses.KEY_UP, ord("k")):
+                    selected_idx = max(0, selected_idx - 1)
+                elif key in (curses.KEY_DOWN, ord("j")):
+                    selected_idx = min(len(user_patterns) - 1, selected_idx + 1)
+                elif key in (curses.KEY_ENTER, 10, 13):
+                    chosen = user_patterns[selected_idx]
+                    removed = self.config.remove_user_pattern(chosen)
+                    if removed:
+                        self.detector.reload_rules()
+                        user_patterns = self.config.raw_config.get("user_patterns", [])
+                        self.set_status(f"Removed rule: {chosen}")
+                        break
+                    else:
+                        self.set_status(f"Failed to remove: {chosen}")
+                elif key in (27, ord("q")):
+                    break
+
+            stdscr.timeout(100)
 
         elif key in (ord("m"), ord("M")):
             # Toggle dry-run / live mode

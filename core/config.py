@@ -156,6 +156,20 @@ class ConfigManager:
             return True
         return False
 
+    def remove_user_pattern(self, pattern: str) -> bool:
+        """Remove a custom attack string from config and persist changes."""
+        pattern = pattern.strip()
+        if not pattern:
+            return False
+        patterns = self.raw_config.get("user_patterns", [])
+        if pattern in patterns:
+            patterns.remove(pattern)
+            self.raw_config["user_patterns"] = patterns
+            self.save()
+            self._build_rules()
+            return True
+        return False
+
     def add_log_file(self, name: str, path: str, persist: bool = False) -> bool:
         """Add a log file to configuration."""
         name = name.strip() or os.path.basename(path.strip())
