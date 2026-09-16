@@ -55,7 +55,10 @@ def main():
 
     args = parser.parse_args()
 
-    # 1. Load configuration
+    # 1. Setup storage first (needed for log config persistence)
+    storage = StorageManager(db_path="sentinel_history.db")
+
+    # 2. Load configuration
     config = ConfigManager(config_path=args.config)
     if args.log:
         config.log_files = []
@@ -97,11 +100,10 @@ def main():
     else:
         dry_run = config.dry_run
 
-    # 2. Setup logger and storage
+    # 3. Setup logger
     logger = setup_logger()
-    storage = StorageManager(db_path="sentinel_history.db")
 
-    # 3. Setup Firewall Manager
+    # 4. Setup Firewall Manager
     tui_ref = [None]  # holder for TUI instance
 
     def on_ban_change(record: BanRecord, action: str):
