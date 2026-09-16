@@ -506,28 +506,124 @@ class FirewallManager:
 
     def get_active_bans_list(self, sort_by_ip: bool = False) -> List[BanRecord]:
         with self.lock:
-            # Merge internal bans with external firewall rules
-            all_bans = list(self.active_bans.values())
+            # Start with internal (dynamic) bans from Sentinel
+            internal_bans: Dict[str, BanRecord] = {}
+            for b in self.active_bans.values():
+                internal_bans[b.ip] = b
 
+            # Collect external firewall rules
+            external_bans: List[BanRecord] = []
             if not self.dry_run:
                 if self.active_backend == "iptables":
-                    all_bans.extend(self._scan_iptables_rules())
+                    external_bans = self._scan_iptables_rules()
                 elif self.active_backend == "ufw":
-                    all_bans.extend(self._scan_ufw_rules())
+                    external_bans = self._scan_ufw_rules()
                 elif self.active_backend == "nft":
-                    all_bans.extend(self._scan_nft_rules())
+                    external_bans = self._scan_nft_rules()
 
-            # Deduplicate by IP
-            seen: set = set()
-            unique: List[BanRecord] = []
-            for b in all_bans:
-                if b.ip not in seen:
-                    seen.add(b.ip)
-                    unique.append(b)
-            
+            # External bans indexed by IP
+            external_by_ip: Dict[str, BanRecord] = {}
+            for b in external_bans:
+                if b.ip not in external_by_ip:
+                    external_by_ip[b.ip] = b
+
+            # Merge: internal bans take priority over external rules for same IP
+            result: List[BanRecord] = list(internal_bans.values())
+            for ip, ext_ban in external_by_ip.items():
+                if ip not in internal_bans:
+                    result.append(ext_ban)
+
             if sort_by_ip:
-                return sorted(unique, key=lambda r: ipaddress.ip_address(r.ip.split('/')[0]))
-            return sorted(unique, key=lambda r: r.banned_at, reverse=True)
+                return sorted(result, key=lambda r: ipaddress.ip_address(r.ip.split('/')[0]))
+            return sorted(result, key=lambda r: r.banned_at, reverse=True)
+
+    def clean_all_utilsec_rules(self) -> int:
+        """Remove ALL iptables/ufw/nft rules created by UtilSec.
+        
+        Called on startup to clear stale firewall state.
+        Returns: number of rules removed.
+        """
+        removed = 0
+        if self.dry_run:
+            return 0
+        
+        try:
+            if self.active_backend == "iptables":
+                result = subprocess.run(
+                    ["iptables", "-L", "INPUT", "-n", "--line-numbers", "-v"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+                )
+                if result.returncode == 0:
+                    lines = result.stdout.decode("utf-8", errors="replace").splitlines()
+                    # Find chain header
+                    chain_idx = None
+                    for i, line in enumerate(lines):
+                        if "chain input" in line.lower():
+                            chain_idx = i
+                            break
+                    if chain_idx is None:
+                        return 0
+                    
+                    # Scan from chain header for UtilSec rules
+                    for i in range(chain_idx + 1, len(lines)):
+                        line = lines[i].strip()
+                        if not line or line.startswith("chain ") or "target" in line.lower():
+                            continue
+                        if "utilsec" not in line.lower():
+                            continue
+                        # Extract rule number (first field)
+                        parts = line.split()
+                        if parts:
+                            try:
+                                rule_num = int(parts[0])
+                                subprocess.run(
+                                    ["iptables", "-D", "INPUT", str(rule_num)],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+                                )
+                                removed += 1
+                            except (ValueError, IndexError):
+                                continue
+            
+            elif self.active_backend == "ufw":
+                result = subprocess.run(
+                    ["ufw", "status", "numbered"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+                )
+                if result.returncode == 0:
+                    lines = result.stdout.decode("utf-8", errors="replace").splitlines()
+                    rule_nums = []
+                    for line in lines:
+                        if "utilsec" not in line.lower():
+                            continue
+                        try:
+                            num_str = line.split(")")[0].strip().split("[")[-1].strip()
+                            rule_nums.append(int(num_str))
+                        except (ValueError, IndexError):
+                            continue
+                    # Delete in reverse order to avoid shifting numbers
+                    for num in reversed(rule_nums):
+                        subprocess.run(
+                            ["ufw", "delete", str(num)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+                        )
+                        removed += 1
+            
+            elif self.active_backend == "nft":
+                result = subprocess.run(
+                    ["nft", "list", "table", "inet", "filter"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+                )
+                if result.returncode == 0 and "utilsec_bans" in result.stdout.decode("utf-8", errors="replace"):
+                    subprocess.run(
+                        ["nft", "delete", "table", "inet", "filter", "utilsec_bans"],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+                    )
+                    removed += 1
+                    
+        except Exception as e:
+            logger.error("Error cleaning firewall rules: %s", e)
+        
+        return removed
 
     def toggle_dry_run(self) -> Tuple[bool, str]:
         """Toggle between dry-run and live system firewall mode.
