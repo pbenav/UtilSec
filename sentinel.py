@@ -110,10 +110,10 @@ def main():
         on_ban_change=on_ban_change,
     )
 
-    # Clean all UtilSec rules from firewall on startup
-    cleaned = firewall.clean_all_utilsec_rules()
-    if cleaned:
-        logger.info("Cleaned %d stale UtilSec rules from firewall on startup", cleaned)
+    # CRITICAL: Ensure whitelist IPs have ACCEPT rules at the TOP of INPUT chain
+    if not dry_run:
+        whitelist_count = firewall._ensure_whitelist_rules(config.whitelist_networks)
+        logger.info("Whitelist protection: %d ACCEPT rules ensured at top of INPUT chain", whitelist_count)
 
     # 4. Setup Attack Detector
     detector = AttackDetector(config=config)

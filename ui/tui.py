@@ -374,7 +374,7 @@ class SentinelTUI:
         stdscr.addstr(max_y - 2, 1, f"STATUS: {self.status_msg}"[: max_x - 2], curses.color_pair(self.C_INFO))
 
         # Hotkeys Bar (Line max_y - 1)
-        help_bar = "[Q]uit [0-9/[]]Screen [Tab/V]iew [M]ode(Live/Sim) [u]nban [U]nban IP [-]Del [B]an [A]Rule [P]ause [I]Info"
+        help_bar = "[Q]uit [0-9/[]]Screen [Tab/V]iew [M]ode(Live/Sim) [u]nban [U]xternal Rules [-]Del [B]an [A]Rule [P]ause [I]Info"
         stdscr.addstr(max_y - 1, 0, help_bar[: max_x - 1], curses.color_pair(self.C_HEADER) | curses.A_BOLD)
 
         # Watermark / branding in bottom-right corner
@@ -787,8 +787,8 @@ class SentinelTUI:
                 self.set_status("No IP selected to unban.")
 
         elif key == ord("U"):
-            # Unban modal: list active bans + manual input
-            self._show_unban_modal(stdscr)
+            # External rules panel: show fail2ban/manual rules and allow unban
+            self._show_external_rules_panel(stdscr)
 
         elif key in (ord("b"), ord("B")):
             # Manual ban modal
@@ -1087,6 +1087,191 @@ class SentinelTUI:
                     else:
                         self.status_msg = f"No active ban found for: {input_val}"
                     break
+
+        # Restore state
+        self.status_msg = prev_status
+        self.running = prev_running
+
+    def _show_external_rules_panel(self, stdscr) -> None:
+        """Display external firewall rules (fail2ban, manual) not managed by UtilSec.
+        
+        Shows rules that were created by fail2ban or manual iptables/ufw commands.
+        Allows unban via fail2ban-client for fail2ban rules, or direct iptables/ufw delete.
+        """
+        max_y, max_x = stdscr.getmaxyx()
+        if max_y < 12 or max_x < 70:
+            self.set_status("Screen too small for external rules panel.")
+            return
+
+        prev_running = self.running
+        prev_status = self.status_msg
+
+        # Get external firewall rules (fail2ban, manual)
+        fw_rules = self.firewall.get_firewall_rules()
+        selected_idx = 0
+        scroll_offset = 0
+
+        while True:
+            stdscr.erase()
+            stdscr.bkgd(' ', curses.color_pair(self.C_DEFAULT))
+
+            # Calculate modal dimensions
+            modal_h = min(len(fw_rules) + 10, max_y - 4)
+            modal_w = min(80, max_x - 4)
+            start_y = (max_y - modal_h) // 2
+            start_x = (max_x - modal_w) // 2
+
+            # Draw modal background
+            for r in range(modal_h):
+                for c in range(modal_w):
+                    if 0 <= start_y + r < max_y and 0 <= start_x + c < max_x:
+                        stdscr.addch(start_y + r, start_x + c, ' ', curses.color_pair(self.C_MUTED))
+
+            # Title
+            title = " EXTERNAL FIREWALL RULES "
+            border_line = "─" * len(title)
+            stdscr.addstr(start_y, start_x + (len(border_line) - len(title)) // 2,
+                          f" {title} ", curses.color_pair(self.C_HEADER) | curses.A_BOLD)
+            stdscr.addstr(start_y + 1, start_x + (len(border_line) - len(border_line)) // 2,
+                          border_line, curses.color_pair(self.C_INFO))
+
+            # Column widths
+            col_ip = 18
+            col_source = 12
+            col_reason = 28
+            col_rule = 5
+
+            # Column headers
+            hdr_row = start_y + 3
+            stdscr.addstr(hdr_row, start_x + 1,
+                          f"  {'#':>4} {'IP/NET':<{col_ip}} {'SOURCE':<{col_source}} {'REASON':<{col_reason}} {'RULE':>{col_rule}}",
+                          curses.color_pair(self.C_INFO) | curses.A_UNDERLINE)
+
+            # Instructions
+            instr_y = start_y + 4
+            stdscr.addstr(instr_y, start_x + 2,
+                          "↑/↓ Navigate  Enter Unban  [Esc] Cancel  [F]ail2ban  [I]ptables",
+                          curses.color_pair(self.C_MUTED))
+
+            # List rules with scroll
+            list_start_y = start_y + 6
+            display_count = min(len(fw_rules), modal_h - 9)
+
+            # Adjust scroll offset
+            if selected_idx < scroll_offset:
+                scroll_offset = selected_idx
+            elif selected_idx >= scroll_offset + display_count:
+                scroll_offset = selected_idx - display_count + 1
+
+            for i in range(display_count):
+                list_idx = scroll_offset + i
+                if list_idx < len(fw_rules):
+                    rule = fw_rules[list_idx]
+                    source_disp = rule.source.upper()[:col_source]
+                    reason_disp = rule.reason[:col_reason]
+                    if len(rule.reason) > col_reason:
+                        reason_disp += ".."
+                    line = f"  {list_idx + 1:>4}. {rule.ip:<{col_ip}} {source_disp:<{col_source}} {reason_disp:<{col_reason}} {rule.rule_num:>{col_rule}}"
+                    if len(line) > modal_w - 2:
+                        line = line[:modal_w - 4] + ".."
+                    y = list_start_y + i
+                    if 0 <= y < max_y - 1:
+                        if list_idx == selected_idx:
+                            stdscr.addstr(y, start_x + 1, f" {line} ",
+                                          curses.color_pair(self.C_WARN) | curses.A_BOLD)
+                        else:
+                            stdscr.addstr(y, start_x + 1, line, curses.color_pair(self.C_DEFAULT))
+
+            # Show scroll indicator
+            if len(fw_rules) > display_count:
+                scroll_info = f"  [{selected_idx + 1}/{len(fw_rules)}] Page {scroll_offset // display_count + 1}"
+                stdscr.addstr(list_start_y + display_count, start_x + 1, scroll_info,
+                              curses.color_pair(self.C_MUTED))
+
+            # If no rules, show message
+            if not fw_rules:
+                msg = "  No external firewall rules detected"
+                stdscr.addstr(list_start_y, start_x + 2, msg, curses.color_pair(self.C_MUTED))
+
+            # Status hint
+            hint_y = list_start_y + display_count + 1
+            if hint_y < max_y - 1:
+                stdscr.addstr(hint_y, start_x + 2,
+                              f"Rules detected: {len(fw_rules)} (fail2ban/manual only)",
+                              curses.color_pair(self.C_INFO))
+
+            stdscr.refresh()
+
+            # Wait for key
+            stdscr.nodelay(False)
+            ch = stdscr.getch()
+            stdscr.nodelay(True)
+
+            if ch == 27:
+                # Escape — cancel
+                break
+            elif ch == curses.KEY_UP:
+                if selected_idx > 0:
+                    selected_idx -= 1
+            elif ch == curses.KEY_DOWN:
+                if selected_idx < len(fw_rules) - 1:
+                    selected_idx += 1
+            elif ch == curses.KEY_PPAGE:
+                selected_idx = max(0, selected_idx - display_count)
+            elif ch == curses.KEY_NPAGE:
+                selected_idx = min(len(fw_rules) - 1, selected_idx + display_count)
+            elif ch == curses.KEY_HOME:
+                selected_idx = 0
+            elif ch == curses.KEY_END:
+                selected_idx = len(fw_rules) - 1
+            elif ch in (10, 13, 27 - 64, curses.KEY_ENTER):
+                # Enter — unban selected rule
+                if fw_rules:
+                    rule = fw_rules[selected_idx]
+                    success = False
+
+                    if rule.source == "fail2ban":
+                        success = self.firewall.unban_fail2ban(rule.ip, rule.jail_name)
+                        if success:
+                            self.status_msg = f"Unbanned {rule.ip} from fail2ban jail {rule.jail_name}"
+                        else:
+                            self.status_msg = f"Failed to unban {rule.ip} from fail2ban"
+                    elif rule.source == "manual":
+                        success = self.firewall.unban_manual_rule(rule.ip, rule.rule_num, rule.backend)
+                        if success:
+                            self.status_msg = f"Removed manual rule {rule.rule_num} for {rule.ip}"
+                        else:
+                            self.status_msg = f"Failed to remove manual rule for {rule.ip}"
+
+                    # Refresh the list
+                    fw_rules = self.firewall.get_firewall_rules()
+                    if selected_idx >= len(fw_rules):
+                        selected_idx = max(0, len(fw_rules) - 1)
+                    continue
+            elif ch in (ord("f"), ord("F")):
+                # Force fail2ban unban for selected rule
+                if fw_rules:
+                    rule = fw_rules[selected_idx]
+                    jail_name = self._prompt_input(stdscr, f"Enter fail2ban jail name for {rule.ip}: ")
+                    if jail_name:
+                        success = self.firewall.unban_fail2ban(rule.ip, jail_name.strip())
+                        if success:
+                            self.status_msg = f"Unbanned {rule.ip} from jail {jail_name.strip()}"
+                        else:
+                            self.status_msg = f"Failed to unban {rule.ip} from jail {jail_name.strip()}"
+                        # Refresh
+                        fw_rules = self.firewall.get_firewall_rules()
+            elif ch in (ord("i"), ord("I")):
+                # Force iptables/ufw delete for selected rule
+                if fw_rules:
+                    rule = fw_rules[selected_idx]
+                    success = self.firewall.unban_manual_rule(rule.ip, rule.rule_num, rule.backend)
+                    if success:
+                        self.status_msg = f"Removed rule {rule.rule_num} ({rule.backend}) for {rule.ip}"
+                    else:
+                        self.status_msg = f"Failed to remove rule for {rule.ip}"
+                    # Refresh
+                    fw_rules = self.firewall.get_firewall_rules()
 
         # Restore state
         self.status_msg = prev_status
