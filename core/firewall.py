@@ -373,7 +373,7 @@ class FirewallManager:
         records: List[BanRecord] = []
         try:
             result = subprocess.run(
-                ["iptables", "-L", "INPUT", "-n", "-v", "--line-numbers"],
+                ["iptables", "-L", "INPUT", "-n"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
             )
             if result.returncode != 0:
@@ -385,30 +385,33 @@ class FirewallManager:
                     continue
                 if "UtilSec" not in line:
                     continue
-                # Extract IP: format is "DROP all -- <IP> 0.0.0.0/0 ..."
+                # Format: "DROP       all  --  17.166.23.0/24       0.0.0.0/0            /* UtilSec */"
+                # The source IP is always the first IP-like token after the action
                 parts = line.split()
-                ip = None
                 for i, part in enumerate(parts):
-                    if part == "--" and i + 1 < len(parts):
-                        candidate = parts[i + 1]
-                        # Validate it looks like an IP
-                        try:
-                            ipaddress.ip_address(candidate)
-                            ip = candidate
-                            break
-                        except ValueError:
-                            continue
-                if ip and ip not in self.active_bans:
-                    records.append(BanRecord(
-                        ip=ip,
-                        reason="External iptables rule (UtilSec)",
-                        matched_pattern="manual",
-                        attack_count=0,
-                        banned_at=0.0,
-                        ban_duration=0,
-                        status="BANNED",
-                        backend="iptables",
-                    ))
+                    # Skip action words and protocol markers
+                    if part in ("DROP", "REJECT", "all", "--", "0.0.0.0/0", "0.0.0.0"):
+                        continue
+                    try:
+                        ipaddress.ip_network(part, strict=False)
+                        # Extract the actual IP (first host in the network)
+                        network = ipaddress.ip_network(part, strict=False)
+                        ip = str(network.network_address)
+                        # Only accept /32 or /24 networks (individual IPs or subnets)
+                        if network.prefixlen in (24, 32) and ip not in self.active_bans:
+                            records.append(BanRecord(
+                                ip=ip,
+                                reason="External iptables rule (UtilSec)",
+                                matched_pattern="manual",
+                                attack_count=0,
+                                banned_at=0.0,
+                                ban_duration=0,
+                                status="BANNED",
+                                backend="iptables",
+                            ))
+                        break
+                    except ValueError:
+                        continue
         except Exception as e:
             logger.debug("Error scanning iptables: %s", e)
         return records
