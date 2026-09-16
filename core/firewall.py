@@ -52,7 +52,7 @@ class FirewallManager:
         self.active_backend = self._detect_backend()
         self._init_scripts()
 
-        # Load existing active bans from storage and normalize to /24 subnets
+        # Step 1: Load existing active bans from storage and normalize to /24 subnets
         if self.storage:
             loaded = self.storage.load_active_bans()
             now = time.time()
@@ -65,18 +65,94 @@ class FirewallManager:
                         self.storage.update_ban_status(target, "EXPIRED")
                         continue
 
-                    # If starting in LIVE mode, ensure the system firewall rule is active in kernel
-                    if not self.dry_run:
-                        record.status = "BANNED"
-                        record.backend = self.active_backend
-                        self._exec_ban_system(record)
-                        self.storage.save_ban(record)
-
                     self.active_bans[target] = record
+
+        # Step 2: Sync with actual firewall state (restore bans that exist in firewall but not in memory)
+        if not self.dry_run:
+            self._sync_bans_with_firewall()
+
+        # Step 3: If starting in LIVE mode, ensure the system firewall rule is active for all loaded bans
+        if not self.dry_run and self.active_bans:
+            with self.lock:
+                for record in self.active_bans.values():
+                    record.status = "BANNED"
+                    record.backend = self.active_backend
+                    self._exec_ban_system(record)
+                    if self.storage:
+                        self.storage.save_ban(record)
 
         # Start expiration reaper thread
         self.reaper_thread = threading.Thread(target=self._expiration_loop, daemon=True)
         self.reaper_thread.start()
+
+    def _sync_bans_with_firewall(self) -> None:
+        """Synchronize active_bans with the actual firewall state at startup.
+        
+        Compares firewall rules with in-memory bans and storage:
+        1. Finds bans in firewall that are NOT in active_bans (process died without cleanup)
+        2. Restores them to active_bans with preserved TTL (not reset)
+        3. Removes bans whose TTL already expired
+        """
+        now = time.time()
+        fw_rules = self.get_firewall_rules()
+        
+        # Find UtilSec rules currently in the firewall
+        firewall_utilsec_ips = set()
+        for rule in fw_rules:
+            if rule.source == "utilsec":
+                firewall_utilsec_ips.add(rule.ip)
+        
+        # Also check active_bans from memory
+        with self.lock:
+            memory_bans = dict(self.active_bans)
+        
+        # For each UtilSec rule in firewall, check if it exists in memory/storage
+        for ip in firewall_utilsec_ips:
+            if ip in memory_bans:
+                # Already in memory, skip
+                continue
+            
+            # Check storage for this ban
+            record = None
+            if self.storage:
+                loaded = self.storage.load_active_bans()
+                if ip in loaded:
+                    record = loaded[ip]
+            
+            if record is None:
+                # No storage record - this is an orphaned rule, leave it (user can clean it manually)
+                logger.info("[SYNC] Found orphaned firewall rule for %s (no storage record). Leaving in place.", ip)
+                continue
+            
+            # Check if TTL expired
+            if record.ban_duration > 0 and now >= record.unban_at:
+                # Expired while app was offline - mark as EXPIRED
+                self.storage.update_ban_status(ip, "EXPIRED")
+                logger.info("[SYNC] Ban %s has expired (unban_at=%s). Marked as EXPIRED.", ip, record.unban_at)
+                continue
+            
+            # Valid ban - restore to active_bans with original TTL preserved
+            subnet_ip = self.to_subnet(ip)
+            record.ip = subnet_ip
+            record.status = "BANNED"
+            record.backend = self.active_backend
+            self.active_bans[subnet_ip] = record
+            
+            logger.info("[SYNC] Restored ban for %s (unban_at=%s, ttl_remaining=%.0fs)",
+                        subnet_ip, record.unban_at, record.unban_at - now)
+        
+        # Clean up: remove from active_bans any ban whose TTL expired
+        expired_ips = []
+        with self.lock:
+            for ip, record in self.active_bans.items():
+                if record.ban_duration > 0 and now >= record.unban_at:
+                    expired_ips.append(ip)
+        
+        for ip in expired_ips:
+            record = self.active_bans.pop(ip, None)
+            if record and self.storage:
+                self.storage.update_ban_status(ip, "EXPIRED")
+            logger.info("[SYNC] Removed expired ban for %s from active_bans", ip)
 
     def _detect_backend(self) -> str:
         """Determines whether real firewall or dry-run should be used."""

@@ -68,6 +68,12 @@ def main():
             config.log_files.append({"name": name, "path": path})
         if config.log_files:
             config.log_file = config.log_files[0]["path"]
+    else:
+        # No command-line logs: try to load persisted config from storage
+        persisted_logs = storage.load_log_config()
+        if persisted_logs:
+            config.log_files = persisted_logs
+            config.log_file = persisted_logs[0]["path"]
 
     if args.backend:
         config.firewall_backend = args.backend
@@ -162,6 +168,10 @@ def main():
     )
     for item in valid_logs:
         watcher_mgr.add_watcher(name=item["name"], path=item["path"], auto_start=False)
+
+    # Persist log configuration to storage
+    if valid_logs:
+        storage.save_log_config(valid_logs)
 
     is_tty = sys.stdout.isatty() and not args.headless
 

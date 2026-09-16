@@ -59,6 +59,18 @@ class StorageManager:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_ip ON events (ip)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_time ON events (timestamp)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_src ON events (source_log)")
+
+            # Log configuration persistence
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS log_config (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    enabled INTEGER DEFAULT 1,
+                    created_at REAL DEFAULT (strftime('%s', 'now'))
+                )
+            """)
+
             conn.commit()
 
     def save_ban(self, ban: BanRecord) -> None:
@@ -171,5 +183,57 @@ class StorageManager:
                 "total_banned": total_banned,
                 "total_events": total_events
             }
+
+    # --- Log Configuration Persistence ---
+
+    def save_log_config(self, logs: List[Dict[str, str]]) -> None:
+        """Persist the list of configured log files."""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            # Clear existing config
+            cursor.execute("DELETE FROM log_config")
+            # Insert all logs
+            for item in logs:
+                cursor.execute(
+                    "INSERT INTO log_config (name, path, enabled) VALUES (?, ?, 1)",
+                    (item.get("name", ""), item["path"])
+                )
+            conn.commit()
+
+    def load_log_config(self) -> List[Dict[str, str]]:
+        """Load persisted log configuration."""
+        logs: List[Dict[str, str]] = []
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name, path FROM log_config WHERE enabled = 1 ORDER BY created_at")
+            for row in cursor.fetchall():
+                logs.append({"name": row[0], "path": row[1]})
+        return logs
+
+    def add_log_config(self, name: str, path: str) -> bool:
+        """Add a single log to the persisted configuration."""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            # Check if already exists
+            cursor.execute("SELECT id FROM log_config WHERE path = ?", (path,))
+            existing = cursor.fetchone()
+            if existing:
+                # Update existing
+                cursor.execute("UPDATE log_config SET name = ?, enabled = 1 WHERE id = ?", (name, existing[0]))
+            else:
+                cursor.execute(
+                    "INSERT INTO log_config (name, path, enabled) VALUES (?, ?, 1)",
+                    (name, path)
+                )
+            conn.commit()
+            return True
+
+    def remove_log_config(self, path: str) -> bool:
+        """Remove a log from the persisted configuration."""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE log_config SET enabled = 0 WHERE path = ?", (path,))
+            conn.commit()
+            return cursor.rowcount > 0
 
 
