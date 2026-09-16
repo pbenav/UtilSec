@@ -13,6 +13,9 @@ venv/
 env/
 ENV/
 
+# Configuration files (override with config.json.example)
+config.json
+
 # Runtime generated databases & state
 sentinel_history.db
 sentinel_history.db*
