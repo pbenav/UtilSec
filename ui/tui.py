@@ -938,6 +938,12 @@ class SentinelTUI:
             stdscr.addstr(start_y + 1, start_x + (len(border_line) - len(border_line)) // 2,
                           border_line, curses.color_pair(self.C_INFO))
 
+            # Column widths
+            col_ip = 18
+            col_reason = 30
+            col_status = 8
+            col_hits = 5
+
             # Column headers
             hdr_row = start_y + 3
             stdscr.addstr(hdr_row, start_x + 1, 
@@ -958,12 +964,6 @@ class SentinelTUI:
                 scroll_offset = selected_idx
             elif selected_idx >= scroll_offset + display_count:
                 scroll_offset = selected_idx - display_count + 1
-
-            # Column widths for aligned display
-            col_ip = 18
-            col_reason = 30
-            col_status = 8
-            col_hits = 5
 
             for i in range(display_count):
                 list_idx = scroll_offset + i
