@@ -269,7 +269,7 @@ class SentinelTUI:
 
             # Left Header: Banned IPs
             stdscr.addstr(4, 2, " BANNED SUBNETS / ATTACKERS ", curses.color_pair(self.C_ALERT) | curses.A_BOLD)
-            tbl_hdr = f"  {'TARGET / SUBNET':<18} {'REASON / RULE':<20} {'HITS':<5} {'TTL':<8} {'STATUS':<7}"
+            tbl_hdr = f"  {'TARGET/SUBNET':<18} {'REASON/RULE':<22} {'HITS':<5} {'TTL':<8} {'STATUS':<8}"
             stdscr.addstr(5, 1, tbl_hdr[: split_x - 1], curses.color_pair(self.C_DEFAULT) | curses.A_UNDERLINE)
 
             # Draw Banned IPs Table
@@ -279,20 +279,24 @@ class SentinelTUI:
                 if self.selected_idx >= len(bans_list):
                     self.selected_idx = max(0, len(bans_list) - 1)
 
+                # Available rows for ban entries (header at line 5, so start at line 6)
+                ban_content_h = table_h - 1  # reserve 1 row for header within table_h
                 if self.selected_idx < self.scroll_offset:
                     self.scroll_offset = self.selected_idx
-                elif self.selected_idx >= self.scroll_offset + table_h:
-                    self.scroll_offset = self.selected_idx - table_h + 1
+                elif self.selected_idx >= self.scroll_offset + ban_content_h:
+                    self.scroll_offset = self.selected_idx - ban_content_h + 1
 
-                visible_bans = bans_list[self.scroll_offset : self.scroll_offset + table_h]
+                visible_bans = bans_list[self.scroll_offset : self.scroll_offset + ban_content_h]
                 for row_i, ban in enumerate(visible_bans):
                     abs_i = self.scroll_offset + row_i
                     y = 6 + row_i
                     is_sel = abs_i == self.selected_idx
 
                     rem = f"{ban.remaining_seconds}s" if ban.ban_duration > 0 else "PERM"
-                    rule_disp = (ban.reason[:18] + "..") if len(ban.reason) > 20 else ban.reason
-                    line_str = f" {ban.ip:<18} {rule_disp:<20} {ban.attack_count:<5} {rem:<8} {ban.status:<7}"
+                    rule_disp = ban.reason[:22]
+                    if len(ban.reason) > 22:
+                        rule_disp += ".."
+                    line_str = f" {ban.ip:<18} {rule_disp:<22} {ban.attack_count:<5} {rem:<8} {ban.status:<8}"
                     line_str = line_str[: split_x - 1].ljust(split_x - 1)
 
                     attr = curses.A_REVERSE if is_sel else curses.A_NORMAL
@@ -301,6 +305,15 @@ class SentinelTUI:
                         stdscr.addstr(y, 1, line_str, curses.color_pair(color) | attr | curses.A_BOLD)
                     else:
                         stdscr.addstr(y, 1, line_str, curses.color_pair(color) | attr)
+
+                # Scroll indicator
+                if len(bans_list) > ban_content_h:
+                    page_num = (self.scroll_offset // ban_content_h) + 1
+                    total_pages = (len(bans_list) + ban_content_h - 1) // ban_content_h
+                    scroll_info = f"  [{self.selected_idx + 1}/{len(bans_list)}] Page {page_num}/{total_pages}"
+                    footer_y = 6 + ban_content_h
+                    if footer_y < max_y - 3:
+                        stdscr.addstr(footer_y, 1, scroll_info[:split_x - 1], curses.color_pair(self.C_MUTED))
 
         if self.view_mode in ("split", "stream"):
             start_x = (split_x + 2) if self.view_mode == "split" else 2
@@ -899,6 +912,7 @@ class SentinelTUI:
         prev_status = self.status_msg
         bans = self.firewall.get_active_bans_list()
         selected_idx = 0
+        scroll_offset = 0
 
         while True:
             stdscr.erase()
@@ -924,27 +938,56 @@ class SentinelTUI:
             stdscr.addstr(start_y + 1, start_x + (len(border_line) - len(border_line)) // 2,
                           border_line, curses.color_pair(self.C_INFO))
 
+            # Column headers
+            hdr_row = start_y + 3
+            stdscr.addstr(hdr_row, start_x + 1, 
+                          f"  {'#':>4} {'IP/NET':<{col_ip}} {'REASON':<{col_reason}} {'HITS':>{col_hits}}  {'STATUS':<{col_status}}",
+                          curses.color_pair(self.C_INFO) | curses.A_UNDERLINE)
+            
             # Instructions
-            instr_y = start_y + 3
+            instr_y = start_y + 4
             stdscr.addstr(instr_y, start_x + 2, "↑/↓ Navigate  Enter Unban  [Esc] Cancel  [M] Manual",
                           curses.color_pair(self.C_MUTED))
 
-            # List bans
-            list_start_y = start_y + 5
-            display_count = min(len(bans), modal_h - 8)
+            # List bans with scroll
+            list_start_y = start_y + 6
+            display_count = min(len(bans), modal_h - 9)
+            
+            # Adjust scroll offset to keep selected item visible
+            if selected_idx < scroll_offset:
+                scroll_offset = selected_idx
+            elif selected_idx >= scroll_offset + display_count:
+                scroll_offset = selected_idx - display_count + 1
+
+            # Column widths for aligned display
+            col_ip = 18
+            col_reason = 30
+            col_status = 8
+            col_hits = 5
+
             for i in range(display_count):
-                if i < len(bans):
-                    ban = bans[i]
-                    line = f"  {i + 1}. {ban.ip}  |  {ban.reason}  |  {ban.status}"
+                list_idx = scroll_offset + i
+                if list_idx < len(bans):
+                    ban = bans[list_idx]
+                    reason_disp = ban.reason[:col_reason]
+                    if len(ban.reason) > col_reason:
+                        reason_disp += ".."
+                    line = f"  {list_idx + 1:>4}. {ban.ip:<{col_ip}} {reason_disp:<{col_reason}} {ban.attack_count:>{col_hits}}  {ban.status:<{col_status}}"
                     if len(line) > modal_w - 2:
                         line = line[:modal_w - 4] + ".."
                     y = list_start_y + i
                     if 0 <= y < max_y - 1:
-                        if i == selected_idx:
+                        if list_idx == selected_idx:
                             stdscr.addstr(y, start_x + 1, f" {line} ",
                                           curses.color_pair(self.C_WARN) | curses.A_BOLD)
                         else:
                             stdscr.addstr(y, start_x + 1, line, curses.color_pair(self.C_DEFAULT))
+
+            # Show scroll indicator
+            if len(bans) > display_count:
+                scroll_info = f"  [{selected_idx + 1}/{len(bans)}] Page {scroll_offset // display_count + 1}"
+                stdscr.addstr(list_start_y + display_count, start_x + 1, scroll_info,
+                              curses.color_pair(self.C_MUTED))
 
             # If no bans, show message
             if not bans:
@@ -973,6 +1016,16 @@ class SentinelTUI:
             elif ch == curses.KEY_DOWN:
                 if selected_idx < len(bans) - 1:
                     selected_idx += 1
+            elif ch == curses.KEY_PPAGE:
+                # Page Up
+                selected_idx = max(0, selected_idx - display_count)
+            elif ch == curses.KEY_NPAGE:
+                # Page Down
+                selected_idx = min(len(bans) - 1, selected_idx + display_count)
+            elif ch == curses.KEY_HOME:
+                selected_idx = 0
+            elif ch == curses.KEY_END:
+                selected_idx = len(bans) - 1
             elif ch in (10, 13, 27 - 64, curses.KEY_ENTER):
                 # Enter — unban selected IP
                 if bans:
