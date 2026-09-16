@@ -768,14 +768,8 @@ class SentinelTUI:
                 self.set_status("No IP selected to unban.")
 
         elif key == ord("U"):
-            # Unban any IP or subnet (even if not in active list)
-            inp = self._prompt_input(stdscr, "Enter IP or Subnet to UNBAN (e.g. 1.2.3.4 or 1.2.3.0/24): ")
-            if inp:
-                result = self.firewall.unban_ip(inp, manual=True)
-                if result:
-                    self.set_status(f"Unbanned: {inp}")
-                else:
-                    self.set_status(f"No active ban found for: {inp}")
+            # Unban modal: list active bans + manual input
+            self._show_unban_modal(stdscr)
 
         elif key in (ord("b"), ord("B")):
             # Manual ban modal
@@ -889,6 +883,151 @@ class SentinelTUI:
             ch = stdscr.getch()
             if ch in (27, ord("i"), ord("I")):
                 break
+
+        # Restore state
+        self.status_msg = prev_status
+        self.running = prev_running
+
+    def _show_unban_modal(self, stdscr) -> None:
+        """Display interactive modal to unban an IP from the firewall ban list."""
+        max_y, max_x = stdscr.getmaxyx()
+        if max_y < 12 or max_x < 50:
+            self.set_status("Screen too small for unban panel.")
+            return
+
+        prev_running = self.running
+        prev_status = self.status_msg
+        bans = self.firewall.get_active_bans_list()
+        selected_idx = 0
+
+        while True:
+            stdscr.erase()
+            stdscr.bkgd(' ', curses.color_pair(self.C_DEFAULT))
+
+            # Calculate modal dimensions
+            modal_h = min(len(bans) + 10, max_y - 4)
+            modal_w = min(80, max_x - 4)
+            start_y = (max_y - modal_h) // 2
+            start_x = (max_x - modal_w) // 2
+
+            # Draw modal background
+            for r in range(modal_h):
+                for c in range(modal_w):
+                    if 0 <= start_y + r < max_y and 0 <= start_x + c < max_x:
+                        stdscr.addch(start_y + r, start_x + c, ' ', curses.color_pair(self.C_MUTED))
+
+            # Title
+            title = " UNBAN FROM FIREWALL "
+            border_line = "─" * len(title)
+            stdscr.addstr(start_y, start_x + (len(border_line) - len(title)) // 2,
+                          f" {title} ", curses.color_pair(self.C_HEADER) | curses.A_BOLD)
+            stdscr.addstr(start_y + 1, start_x + (len(border_line) - len(border_line)) // 2,
+                          border_line, curses.color_pair(self.C_INFO))
+
+            # Instructions
+            instr_y = start_y + 3
+            stdscr.addstr(instr_y, start_x + 2, "↑/↓ Navigate  Enter Unban  [Esc] Cancel  [M] Manual",
+                          curses.color_pair(self.C_MUTED))
+
+            # List bans
+            list_start_y = start_y + 5
+            display_count = min(len(bans), modal_h - 8)
+            for i in range(display_count):
+                if i < len(bans):
+                    ban = bans[i]
+                    line = f"  {i + 1}. {ban.ip}  |  {ban.reason}  |  {ban.status}"
+                    if len(line) > modal_w - 2:
+                        line = line[:modal_w - 4] + ".."
+                    y = list_start_y + i
+                    if 0 <= y < max_y - 1:
+                        if i == selected_idx:
+                            stdscr.addstr(y, start_x + 1, f" {line} ",
+                                          curses.color_pair(self.C_WARN) | curses.A_BOLD)
+                        else:
+                            stdscr.addstr(y, start_x + 1, line, curses.color_pair(self.C_DEFAULT))
+
+            # If no bans, show message
+            if not bans:
+                msg = "  No active bans in firewall"
+                stdscr.addstr(list_start_y, start_x + 2, msg, curses.color_pair(self.C_MUTED))
+
+            # Manual input hint
+            hint_y = list_start_y + display_count + 1
+            if hint_y < max_y - 1:
+                stdscr.addstr(hint_y, start_x + 2, "[M] Enter IP manually to unban",
+                              curses.color_pair(self.C_INFO))
+
+            stdscr.refresh()
+
+            # Wait for key
+            stdscr.nodelay(False)
+            ch = stdscr.getch()
+            stdscr.nodelay(True)
+
+            if ch == 27:
+                # Escape — cancel
+                break
+            elif ch == curses.KEY_UP:
+                if selected_idx > 0:
+                    selected_idx -= 1
+            elif ch == curses.KEY_DOWN:
+                if selected_idx < len(bans) - 1:
+                    selected_idx += 1
+            elif ch in (10, 13, 27 - 64, curses.KEY_ENTER):
+                # Enter — unban selected IP
+                if bans:
+                    target_ip = bans[selected_idx].ip
+                    self.firewall.unban_ip(target_ip, manual=True)
+                    self.status_msg = f"Unbanned: {target_ip}"
+                    break
+            elif ch in (ord("m"), ord("M")):
+                # Manual input mode
+                stdscr.nodelay(False)
+                stdscr.erase()
+                stdscr.bkgd(' ', curses.color_pair(self.C_DEFAULT))
+
+                manual_title = " MANUAL UNBAN "
+                manual_border = "─" * len(manual_title)
+                stdscr.addstr(start_y, start_x + (len(manual_border) - len(manual_title)) // 2,
+                              f" {manual_title} ", curses.color_pair(self.C_WARN) | curses.A_BOLD)
+                stdscr.addstr(start_y + 1, start_x + (len(manual_border) - len(manual_border)) // 2,
+                              manual_border, curses.color_pair(self.C_INFO))
+
+                prompt_line = "  Enter IP or Subnet to UNBAN (e.g. 1.2.3.4 or 1.2.3.0/24):"
+                stdscr.addstr(start_y + 3, start_x + 1, prompt_line, curses.color_pair(self.C_INFO))
+                stdscr.addstr(start_y + 4, start_x + 1, "  " + "_" * 40, curses.color_pair(self.C_MUTED))
+                stdscr.refresh()
+
+                # Read input
+                input_val = ""
+                cursor_y = start_y + 4
+                cursor_x = start_x + 3
+                while True:
+                    stdscr.nodelay(False)
+                    ch = stdscr.getch()
+                    stdscr.nodelay(True)
+
+                    if ch in (27, 10, 13, curses.KEY_ENTER):
+                        # Escape or Enter to confirm
+                        break
+                    elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                        if input_val:
+                            input_val = input_val[:-1]
+                    elif 32 <= ch <= 126:
+                        input_val += chr(ch)
+
+                    # Update display
+                    stdscr.addstr(cursor_y, cursor_x, input_val.ljust(40)[:40] + " ",
+                                  curses.color_pair(self.C_SUCCESS) | curses.A_BOLD)
+                    stdscr.refresh()
+
+                if input_val:
+                    result = self.firewall.unban_ip(input_val, manual=True)
+                    if result:
+                        self.status_msg = f"Unbanned: {input_val}"
+                    else:
+                        self.status_msg = f"No active ban found for: {input_val}"
+                    break
 
         # Restore state
         self.status_msg = prev_status
