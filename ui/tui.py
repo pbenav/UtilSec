@@ -260,6 +260,10 @@ class SentinelTUI:
         # 4. Main Area (Lines 4 to max_y - 4)
         table_h = max(1, max_y - 9)
 
+        # For bans-only mode, use full height (no stream panel)
+        if self.view_mode == "bans":
+            bans_available_h = max(1, max_y - 7)  # lines 4-5 header + data down to line before help bar
+
         # Mode indicator in title bar
         view_label = f"[VIEW: {self.view_mode.upper()}]"
         stdscr.addstr(4, max_x - len(view_label) - 2, view_label, curses.color_pair(self.C_INFO) | curses.A_BOLD)
@@ -280,7 +284,7 @@ class SentinelTUI:
                     self.selected_idx = max(0, len(bans_list) - 1)
 
                 # Available rows for ban entries (header at line 5, so start at line 6)
-                ban_content_h = table_h - 1  # reserve 1 row for header within table_h
+                ban_content_h = bans_available_h - 1  # reserve 1 row for header within bans_available_h
                 if self.selected_idx < self.scroll_offset:
                     self.scroll_offset = self.selected_idx
                 elif self.selected_idx >= self.scroll_offset + ban_content_h:

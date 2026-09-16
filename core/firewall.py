@@ -504,7 +504,7 @@ class FirewallManager:
             logger.debug("Error scanning nftables: %s", e)
         return records
 
-    def get_active_bans_list(self) -> List[BanRecord]:
+    def get_active_bans_list(self, sort_by_ip: bool = False) -> List[BanRecord]:
         with self.lock:
             # Merge internal bans with external firewall rules
             all_bans = list(self.active_bans.values())
@@ -524,6 +524,9 @@ class FirewallManager:
                 if b.ip not in seen:
                     seen.add(b.ip)
                     unique.append(b)
+            
+            if sort_by_ip:
+                return sorted(unique, key=lambda r: ipaddress.ip_address(r.ip.split('/')[0]))
             return sorted(unique, key=lambda r: r.banned_at, reverse=True)
 
     def toggle_dry_run(self) -> Tuple[bool, str]:
