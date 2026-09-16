@@ -263,6 +263,8 @@ class SentinelTUI:
         # For bans-only mode, use full height (no stream panel)
         if self.view_mode == "bans":
             bans_available_h = max(1, max_y - 7)  # lines 4-5 header + data down to line before help bar
+        else:
+            bans_available_h = table_h - 1
 
         # Mode indicator in title bar
         view_label = f"[VIEW: {self.view_mode.upper()}]"
