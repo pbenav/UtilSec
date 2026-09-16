@@ -111,10 +111,9 @@ def main():
     )
 
     # Clean all UtilSec rules from firewall on startup
-    if not dry_run:
-        cleaned = firewall.clean_all_utilsec_rules()
-        if cleaned:
-            logger.info("Cleaned %d stale UtilSec rules from firewall on startup", cleaned)
+    cleaned = firewall.clean_all_utilsec_rules()
+    if cleaned:
+        logger.info("Cleaned %d stale UtilSec rules from firewall on startup", cleaned)
 
     # 4. Setup Attack Detector
     detector = AttackDetector(config=config)

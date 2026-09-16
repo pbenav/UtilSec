@@ -511,15 +511,14 @@ class FirewallManager:
             for b in self.active_bans.values():
                 internal_bans[b.ip] = b
 
-            # Collect external firewall rules
+            # Collect external firewall rules (always scan, even in dry-run)
             external_bans: List[BanRecord] = []
-            if not self.dry_run:
-                if self.active_backend == "iptables":
-                    external_bans = self._scan_iptables_rules()
-                elif self.active_backend == "ufw":
-                    external_bans = self._scan_ufw_rules()
-                elif self.active_backend == "nft":
-                    external_bans = self._scan_nft_rules()
+            if self.active_backend == "iptables":
+                external_bans = self._scan_iptables_rules()
+            elif self.active_backend == "ufw":
+                external_bans = self._scan_ufw_rules()
+            elif self.active_backend == "nft":
+                external_bans = self._scan_nft_rules()
 
             # External bans indexed by IP
             external_by_ip: Dict[str, BanRecord] = {}
