@@ -136,8 +136,7 @@ class FirewallManager:
                 pass
         return None
 
-    def _get_safe_subnets(self, network: ipaddress.IPv4Network | ipaddress.IPv6Network,
-                          whitelist_nets: List) -> List[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    def _get_safe_subnets(self, network, whitelist_nets: List) -> List:
         """Split a network into subnets that don't overlap with any whitelisted network.
 
         Recursively splits the network until all resulting subnets are either
