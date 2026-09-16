@@ -1,5 +1,6 @@
 """Unit tests for UtilSec Sentinel."""
 
+import ipaddress
 import os
 import tempfile
 import time
@@ -368,4 +369,125 @@ class TestSentinelCore(unittest.TestCase):
         # Verify the about modal method exists and is callable
         self.assertTrue(hasattr(tui, "_show_about_modal"))
         self.assertTrue(callable(getattr(tui, "_show_about_modal")))
+
+    def test_whitelist_subnet_splitting(self):
+        import ipaddress
+        # Config with a whitelisted IP inside a potential /24 range
+        cfg_path = os.path.join(self.tmp_dir.name, "split_cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write("""{
+                "log_file": "test.log",
+                "firewall_backend": "dummy",
+                "dry_run": true,
+                "default_ban_duration": 10,
+                "threshold_404": 3,
+                "window_seconds": 5,
+                "whitelist": ["185.204.62.36"],
+                "user_patterns": ["/blocked-test-url"],
+                "heuristic_rules": []
+            }""")
+        cfg = ConfigManager(cfg_path)
+        fw = FirewallManager(dry_run=True, storage=self.storage)
+
+        # _get_safe_subnets should exclude whitelisted IPs from ban ranges
+        full_subnet = ipaddress.ip_network("185.204.62.0/24", strict=False)
+        safe = fw._get_safe_subnets(full_subnet, cfg.whitelist_networks)
+
+        # Should return subnets that don't include .36
+        all_ips = set()
+        for s in safe:
+            all_ips.update(s)
+        self.assertNotIn(ipaddress.ip_address("185.204.62.36"), all_ips)
+
+        # The attacker IP should still be covered by some safe subnet
+        attacker = ipaddress.ip_address("185.204.62.31")
+        covered = any(attacker in s for s in safe)
+        self.assertTrue(covered)
+
+        # Ban should not create a ban record for the whitelisted IP
+        fw.ban_ip(
+            ip="185.204.62.31",
+            reason="Test Split Ban",
+            matched_pattern="/.env",
+            duration=3600,
+            config=cfg,
+        )
+
+        # The /24 itself should NOT be in active bans
+        self.assertNotIn("185.204.62.0/24", fw.active_bans)
+
+        # But some safe subnets should be present
+        self.assertGreater(len(fw.active_bans), 0)
+
+        # Whitelisted IP should not be covered by any ban
+        self.assertIsNone(fw.is_ip_banned("185.204.62.36"))
+
+        # Attacker IP should be covered
+        self.assertIsNotNone(fw.is_ip_banned("185.204.62.31"))
+
+    def test_whitelist_full_overlap_no_ban(self):
+        # Config where the attacker IP is itself whitelisted
+        cfg_path = os.path.join(self.tmp_dir.name, "full_overlap_cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write("""{
+                "log_file": "test.log",
+                "firewall_backend": "dummy",
+                "dry_run": true,
+                "default_ban_duration": 10,
+                "threshold_404": 3,
+                "window_seconds": 5,
+                "whitelist": ["10.0.0.50"],
+                "user_patterns": ["/blocked-test-url"],
+                "heuristic_rules": []
+            }""")
+        cfg = ConfigManager(cfg_path)
+        fw = FirewallManager(dry_run=True, storage=self.storage)
+
+        # _get_safe_subnets with a network entirely whitelisted
+        full_subnet = ipaddress.ip_network("10.0.0.0/24", strict=False)
+        safe = fw._get_safe_subnets(full_subnet, cfg.whitelist_networks)
+
+        # Only the whitelisted IP should be excluded
+        all_ips = set()
+        for s in safe:
+            all_ips.update(s)
+        self.assertNotIn(ipaddress.ip_address("10.0.0.50"), all_ips)
+        # Other IPs in the /24 should be covered
+        self.assertIn(ipaddress.ip_address("10.0.0.1"), all_ips)
+
+    def test_firewall_ban_with_whitelist_config(self):
+        # Config with whitelisted IP in range 192.168.1.0/24
+        cfg_path = os.path.join(self.tmp_dir.name, "range_cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write("""{
+                "log_file": "test.log",
+                "firewall_backend": "dummy",
+                "dry_run": true,
+                "default_ban_duration": 10,
+                "threshold_404": 3,
+                "window_seconds": 5,
+                "whitelist": ["192.168.1.100"],
+                "user_patterns": ["/blocked-test-url"],
+                "heuristic_rules": []
+            }""")
+        cfg = ConfigManager(cfg_path)
+        fw = FirewallManager(dry_run=True, storage=self.storage)
+
+        # Ban IP 192.168.1.50 — should split and exclude .100
+        fw.ban_ip(
+            ip="192.168.1.50",
+            reason="Test Range Ban",
+            matched_pattern="/test",
+            duration=3600,
+            config=cfg,
+        )
+
+        # The full /24 should NOT be banned
+        self.assertNotIn("192.168.1.0/24", fw.active_bans)
+
+        # Whitelisted IP should not be banned
+        self.assertIsNone(fw.is_ip_banned("192.168.1.100"))
+
+        # Attacker IP should be banned
+        self.assertIsNotNone(fw.is_ip_banned("192.168.1.50"))
 

@@ -136,6 +136,39 @@ class FirewallManager:
                 pass
         return None
 
+    def _get_safe_subnets(self, network: ipaddress.IPv4Network | ipaddress.IPv6Network,
+                          whitelist_nets: List) -> List[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+        """Split a network into subnets that don't overlap with any whitelisted network.
+
+        Recursively splits the network until all resulting subnets are either
+        fully outside whitelisted ranges or are single IPs that are whitelisted.
+        """
+        safe = []
+        stack = [network]
+        while stack:
+            net = stack.pop()
+            # Check if this network overlaps with any whitelisted network
+            overlaps_whitelist = False
+            for wnet in whitelist_nets:
+                if net.overlaps(wnet):
+                    overlaps_whitelist = True
+                    break
+
+            if not overlaps_whitelist:
+                # Entire network is safe
+                safe.append(net)
+            elif net.prefixlen == (net.version == 4 and 32 or 128):
+                # Single IP and it overlaps — it's whitelisted, skip it
+                pass
+            else:
+                # Split in half and check each half
+                try:
+                    stack.extend(net.subnets())
+                except (ValueError, TypeError):
+                    # Last resort: skip this network
+                    pass
+        return safe
+
     def ban_ip(
         self,
         ip: str,
@@ -144,22 +177,61 @@ class FirewallManager:
         duration: int,
         last_url: str = "",
         count: int = 1,
+        config=None,
     ) -> bool:
-        """Bans an IP or Subnet (e.g. /24) for `duration` seconds."""
-        # Always enforce /24 subnet!
-        ip = self.to_subnet(ip)
+        """Bans an IP or Subnet (e.g. /24) for `duration` seconds.
+
+        If ban_subnet is enabled and the target subnet contains whitelisted IPs,
+        the subnet is automatically split into safe sub-ranges that exclude them.
+        """
+        # Resolve target subnet
+        target = self.to_subnet(ip)
+
+        # Whitelist-aware splitting: if the /24 overlaps with whitelisted networks,
+        # compute safe sub-ranges that exclude those whitelisted IPs
+        if config and self.ban_subnet and "/" in target:
+            try:
+                net = ipaddress.ip_network(target, strict=False)
+                safe_subnets = self._get_safe_subnets(net, config.whitelist_networks)
+                if safe_subnets:
+                    # Ban each safe subnet individually
+                    for subnet in safe_subnets:
+                        self._do_ban(
+                            ip=str(subnet),
+                            reason=reason,
+                            matched_pattern=matched_pattern,
+                            duration=duration,
+                            last_url=last_url,
+                            count=count,
+                        )
+                    # Report the first safe subnet as the primary result
+                    return True
+                else:
+                    # Entire subnet is whitelisted — don't ban anything
+                    logger.warning(
+                        "Refusing to ban %s: entire range overlaps with whitelisted networks",
+                        target,
+                    )
+                    return False
+            except (ValueError, TypeError):
+                pass
+
+        # No whitelist conflict or single IP — ban directly
+        return self._do_ban(target, reason, matched_pattern, duration, last_url, count)
+
+    def _do_ban(self, ip: str, reason: str, matched_pattern: str, duration: int,
+                last_url: str, count: int) -> bool:
+        """Internal: create a ban record and execute firewall rules for a single target."""
         now = time.time()
         with self.lock:
             if ip in self.active_bans:
                 record = self.active_bans[ip]
                 record.attack_count += count
                 record.last_url = last_url or record.last_url
-                # Reset penalty TTL so repeat attackers don't get unbanned mid-attack
                 record.banned_at = now
                 if duration > record.ban_duration:
                     record.ban_duration = duration
 
-                # In live mode, ensure the ban is enforced in the kernel firewall
                 if not self.dry_run:
                     record.status = "BANNED"
                     record.backend = self.active_backend
@@ -182,7 +254,6 @@ class FirewallManager:
             )
             self.active_bans[ip] = record
 
-        # Execute system firewall command
         self._exec_ban_system(record)
 
         if self.storage:
