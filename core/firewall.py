@@ -368,10 +368,160 @@ class FirewallManager:
 
             time.sleep(1.0)
 
+    def _scan_iptables_rules(self) -> List[BanRecord]:
+        """Scan iptables for UtilSec DROP/REJECT rules not in active_bans."""
+        records: List[BanRecord] = []
+        try:
+            result = subprocess.run(
+                ["iptables", "-L", "INPUT", "-n", "-v", "--line-numbers"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+            )
+            if result.returncode != 0:
+                return records
+            lines = result.stdout.decode("utf-8", errors="replace").splitlines()
+            for line in lines:
+                line = line.strip()
+                if "DROP" not in line and "REJECT" not in line:
+                    continue
+                if "UtilSec" not in line:
+                    continue
+                # Extract IP: format is "DROP all -- <IP> 0.0.0.0/0 ..."
+                parts = line.split()
+                ip = None
+                for i, part in enumerate(parts):
+                    if part == "--" and i + 1 < len(parts):
+                        candidate = parts[i + 1]
+                        # Validate it looks like an IP
+                        try:
+                            ipaddress.ip_address(candidate)
+                            ip = candidate
+                            break
+                        except ValueError:
+                            continue
+                if ip and ip not in self.active_bans:
+                    records.append(BanRecord(
+                        ip=ip,
+                        reason="External iptables rule (UtilSec)",
+                        matched_pattern="manual",
+                        attack_count=0,
+                        banned_at=0.0,
+                        ban_duration=0,
+                        status="BANNED",
+                        backend="iptables",
+                    ))
+        except Exception as e:
+            logger.debug("Error scanning iptables: %s", e)
+        return records
+
+    def _scan_ufw_rules(self) -> List[BanRecord]:
+        """Scan ufw for UtilSec deny rules not in active_bans."""
+        records: List[BanRecord] = []
+        try:
+            result = subprocess.run(
+                ["ufw", "status", "numbered"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+            )
+            if result.returncode != 0:
+                return records
+            lines = result.stdout.decode("utf-8", errors="replace").splitlines()
+            for line in lines:
+                if "deny" not in line.lower() and "reject" not in line.lower():
+                    continue
+                if "UtilSec" not in line:
+                    continue
+                # Extract IP from: "from <IP>"
+                parts = line.split()
+                ip = None
+                for i, part in enumerate(parts):
+                    if part == "from" and i + 1 < len(parts):
+                        candidate = parts[i + 1]
+                        try:
+                            ipaddress.ip_address(candidate)
+                            ip = candidate
+                            break
+                        except ValueError:
+                            continue
+                if ip and ip not in self.active_bans:
+                    records.append(BanRecord(
+                        ip=ip,
+                        reason="External ufw rule (UtilSec)",
+                        matched_pattern="manual",
+                        attack_count=0,
+                        banned_at=0.0,
+                        ban_duration=0,
+                        status="BANNED",
+                        backend="ufw",
+                    ))
+        except Exception as e:
+            logger.debug("Error scanning ufw: %s", e)
+        return records
+
+    def _scan_nft_rules(self) -> List[BanRecord]:
+        """Scan nftables for UtilSec ban rules not in active_bans."""
+        records: List[BanRecord] = []
+        try:
+            result = subprocess.run(
+                ["nft", "list", "table", "inet", "filter"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+            )
+            if result.returncode != 0:
+                return records
+            output = result.stdout.decode("utf-8", errors="replace")
+            if "utilsec_bans" not in output:
+                return records
+            # Extract IPs from the set
+            in_set = False
+            for line in output.splitlines():
+                if "utilsec_bans" in line and "{" in line:
+                    in_set = True
+                    continue
+                if in_set:
+                    if "}" in line:
+                        break
+                    for token in line.replace("{", " ").replace("}", " ").replace(",", " ").split():
+                        token = token.strip()
+                        if not token or token.startswith('"') or token.startswith("'"):
+                            continue
+                        try:
+                            ipaddress.ip_address(token)
+                            if token not in self.active_bans:
+                                records.append(BanRecord(
+                                    ip=token,
+                                    reason="External nft rule (UtilSec)",
+                                    matched_pattern="manual",
+                                    attack_count=0,
+                                    banned_at=0.0,
+                                    ban_duration=0,
+                                    status="BANNED",
+                                    backend="nft",
+                                ))
+                        except ValueError:
+                            continue
+        except Exception as e:
+            logger.debug("Error scanning nftables: %s", e)
+        return records
+
     def get_active_bans_list(self) -> List[BanRecord]:
         with self.lock:
-            # Return sorted by banned_at desc
-            return sorted(self.active_bans.values(), key=lambda r: r.banned_at, reverse=True)
+            # Merge internal bans with external firewall rules
+            all_bans = list(self.active_bans.values())
+
+            if not self.dry_run:
+                if self.active_backend == "iptables":
+                    all_bans.extend(self._scan_iptables_rules())
+                elif self.active_backend == "ufw":
+                    all_bans.extend(self._scan_ufw_rules())
+                elif self.active_backend == "nft":
+                    all_bans.extend(self._scan_nft_rules())
+
+            # Deduplicate by IP
+            seen: set = set()
+            unique: List[BanRecord] = []
+            for b in all_bans:
+                if b.ip not in seen:
+                    seen.add(b.ip)
+                    unique.append(b)
+            return sorted(unique, key=lambda r: r.banned_at, reverse=True)
 
     def toggle_dry_run(self) -> Tuple[bool, str]:
         """Toggle between dry-run and live system firewall mode.
