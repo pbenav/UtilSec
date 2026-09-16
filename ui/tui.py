@@ -355,8 +355,15 @@ class SentinelTUI:
         stdscr.addstr(max_y - 2, 1, f"STATUS: {self.status_msg}"[: max_x - 2], curses.color_pair(self.C_INFO))
 
         # Hotkeys Bar (Line max_y - 1)
-        help_bar = "[Q]uit [0-9/[]]Screen [Tab/V]iew [M]ode(Live/Sim) [+]Add Log [-]Del [U]nban [B]an [A]Rule [P]ause"
+        help_bar = "[Q]uit [0-9/[]]Screen [Tab/V]iew [M]ode(Live/Sim) [+]Add Log [-]Del [U]nban [B]an [A]Rule [P]ause [I]Info"
         stdscr.addstr(max_y - 1, 0, help_bar[: max_x - 1], curses.color_pair(self.C_HEADER) | curses.A_BOLD)
+
+        # Watermark / branding in bottom-right corner
+        if max_x > 50:
+            watermark = "UtilSec by Sientia Labs"
+            wm_x = max_x - len(watermark) - 1
+            if wm_x > 30:
+                stdscr.addstr(max_y - 1, wm_x, watermark, curses.color_pair(self.C_MUTED))
 
         stdscr.refresh()
 
@@ -799,6 +806,83 @@ class SentinelTUI:
                 ip: b for ip, b in self.firewall.active_bans.items() if not b.is_expired
             }
             self.set_status("Cleaned expired records from display.")
+
+        elif key in (ord("i"), ord("I")):
+            # Show copyright / about modal
+            self._show_about_modal(stdscr)
+
+    def _show_about_modal(self, stdscr) -> None:
+        """Display copyright / about information modal."""
+        max_y, max_x = stdscr.getmaxyx()
+        if max_y < 12 or max_x < 50:
+            self.set_status("Screen too small for info panel.")
+            return
+
+        # Store current state
+        prev_running = self.running
+        prev_status = self.status_msg
+
+        # Draw overlay background
+        for r in range(max_y):
+            stdscr.addstr(r, 0, " " * (max_x - 1), curses.color_pair(self.C_MUTED))
+
+        # Title
+        title = " ABOUT UTILSEC SENTINEL "
+        border_line = "─" * (len(title) + 2)
+        stdscr.addstr(max_y // 2 - 6, 0, " " * (max_x - 1))
+        stdscr.addstr(max_y // 2 - 6, (max_x - len(title)) // 2, f" {title} ", curses.color_pair(self.C_HEADER) | curses.A_BOLD)
+        stdscr.addstr(max_y // 2 - 5, (max_x - len(border_line)) // 2, border_line, curses.color_pair(self.C_INFO))
+
+        lines = [
+            "",
+            "  UtilSec Sentinel - Real-time Web Security Monitor",
+            "  & Automatic Firewall Ban Tool",
+            "",
+            "  Developed by Sientia Open Source Labs",
+            "  https://github.com/sientia",
+            "",
+            "  Licensed under GNU Affero General Public License v3.0 (AGPL-3.0)",
+            "  Copyright (C) 2025-2026 Sientia Open Source Labs",
+            "",
+            "  This is free software: you are free to change and redistribute it",
+            "  under the terms of the AGPL-3.0 license.",
+            "",
+            "  Support open source development:",
+            "  Patreon:  https://www.patreon.com/cw/sientia",
+            "  Buy Me:   https://buymeacoffee.com/sientia",
+            "",
+            "  Press [Esc] or [I] to close",
+        ]
+
+        start_y = max_y // 2 - 4
+        for i, line in enumerate(lines):
+            y = start_y + i
+            if 0 <= y < max_y - 1:
+                x = (max_x - len(line)) // 2
+                if x < 1:
+                    x = 1
+                if len(line) > max_x - 2:
+                    line = line[: max_x - 4] + ".."
+                attr = curses.color_pair(self.C_DEFAULT)
+                if "Sientia Open Source Labs" in line:
+                    attr = curses.color_pair(self.C_SUCCESS) | curses.A_BOLD
+                elif "AGPL-3.0" in line:
+                    attr = curses.color_pair(self.C_WARN) | curses.A_BOLD
+                elif "Patreon" in line or "Buy Me" in line:
+                    attr = curses.color_pair(self.C_INFO)
+                stdscr.addstr(y, x, line, attr)
+
+        stdscr.refresh()
+
+        # Wait for escape or 'i' to close
+        while True:
+            ch = stdscr.getch()
+            if ch in (27, ord("i"), ord("I")):
+                break
+
+        # Restore state
+        self.status_msg = prev_status
+        self.running = prev_running
 
     def _prompt_input(self, stdscr, prompt: str) -> str:
         """Displays an inline input prompt in the status bar."""

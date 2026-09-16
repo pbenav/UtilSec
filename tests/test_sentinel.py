@@ -353,3 +353,19 @@ class TestSentinelCore(unittest.TestCase):
         self.assertIsInstance(msg, str)
         self.assertTrue(len(msg) > 0)
 
+    def test_tui_about_modal_method_exists(self):
+        from ui.tui import SentinelTUI
+        from core.watcher import LogWatcherManager
+
+        mgr = LogWatcherManager(on_request=lambda *args: None)
+        tui = SentinelTUI(
+            config=self.config,
+            detector=self.detector,
+            firewall=self.firewall,
+            watcher_manager=mgr,
+            storage=self.storage,
+        )
+        # Verify the about modal method exists and is callable
+        self.assertTrue(hasattr(tui, "_show_about_modal"))
+        self.assertTrue(callable(getattr(tui, "_show_about_modal")))
+
