@@ -50,6 +50,8 @@ class SentinelTUI:
         self._analytics_lock = __import__("threading").Lock()
         self._stats_data = None
         self._stats_loading = False
+        self._last_stats_update = 0.0
+        self._stats_update_interval = 4.0
 
         # Pre-load recent events from database so stream is never empty
         if self.storage:
@@ -704,6 +706,10 @@ class SentinelTUI:
         screens = self.get_screens()
 
         if key in (ord("q"), ord("Q")):
+            if hasattr(self, "_showing_stats") and self._showing_stats:
+                self._showing_stats = False
+                self.set_status("Panel de estadísticas cerrado.")
+                return
             self.running = False
 
         elif ord("0") <= key <= ord("9"):
@@ -780,16 +786,22 @@ class SentinelTUI:
             # Toggle statistics screen
             if hasattr(self, '_showing_stats') and self._showing_stats:
                 self._showing_stats = False
-                self.set_status("Statistics panel closed.")
+                self.set_status("Panel de estadísticas cerrado.")
             else:
                 self._showing_stats = True
-                self.set_status("Opening statistics panel...")
+                self._update_stats_async(force=True)
+                self.set_status("Abriendo panel de estadísticas...")
+
+        elif key in (ord("r"), ord("R")):
+            if hasattr(self, '_showing_stats') and self._showing_stats:
+                self._update_stats_async(force=True)
+                self.set_status("Actualizando estadísticas...")
 
         elif key == 27 or key == 255:
             # ESC key - close stats screen
             if hasattr(self, '_showing_stats') and self._showing_stats:
                 self._showing_stats = False
-                self.set_status("Statistics panel closed.")
+                self.set_status("Panel de estadísticas cerrado.")
 
         elif key == curses.KEY_UP:
             if self.selected_idx > 0:
@@ -1422,48 +1434,31 @@ class SentinelTUI:
         stdscr.timeout(100)
         return "".join(buf).strip()
 
-    def _update_stats_async(self) -> None:
-        """Updates statistics in background thread to avoid blocking TUI."""
-        if self._stats_loading:
+    def _update_stats_async(self, force: bool = False) -> None:
+        """Updates statistics in background thread without blocking TUI."""
+        now = time.time()
+        if not force:
+            if self._stats_loading:
+                return
+            if now - getattr(self, "_last_stats_update", 0.0) < getattr(self, "_stats_update_interval", 4.0):
+                return
+
+        if self._stats_loading or self._analytics_lock.locked():
             return
-        if self._analytics_lock.locked():
-            return
+
+        self._last_stats_update = now
 
         def _fetch():
             with self._analytics_lock:
                 self._stats_loading = True
             try:
-                all_attacks: Deque[AttackEvent] = deque()
-                all_attacks.extend(self.recent_attacks)
-                for dq in self.screen_attacks.values():
-                    all_attacks.extend(dq)
-
                 analytics = AttackAnalytics(
                     detector=self.detector,
                     recent_attacks=self.recent_attacks,
                     screen_attacks=self.screen_attacks,
+                    storage=self.storage,
                 )
-
-                if len(all_attacks) == 0:
-                    stats = {
-                        "overall": analytics.get_overall_stats(),
-                        "categories": [],
-                        "top_ips": [],
-                        "top_rules": [],
-                        "hourly": {},
-                        "geolocation": [],
-                        "empty": True,
-                    }
-                else:
-                    stats = {
-                        "overall": analytics.get_overall_stats(),
-                        "categories": analytics.get_category_breakdown(),
-                        "top_ips": analytics.get_top_ips(),
-                        "top_rules": analytics.get_top_rules(),
-                        "hourly": analytics.get_hourly_evolution(),
-                        "geolocation": analytics.get_geolocation_stats(),
-                        "empty": False,
-                    }
+                stats = analytics.get_all_stats()
                 with self._analytics_lock:
                     self._stats_data = stats
                     self._stats_loading = False
@@ -1477,299 +1472,247 @@ class SentinelTUI:
         t.start()
 
     def _draw_stats_screen(self, stdscr, max_y: int, max_x: int) -> None:
-        """Draws the dedicated statistics screen."""
+        """Draws the dedicated statistics screen with responsive layout."""
         stdscr.erase()
 
         # Header
         title = " UTILSEC SENTINEL - ESTADÍSTICAS "
-        mode_str = f"[SIMULACIÓN]" if self.firewall.dry_run else f"[EN VIVO: {self.firewall.active_backend.upper()}]"
+        mode_str = "[SIMULACIÓN]" if self.firewall.dry_run else f"[EN VIVO: {self.firewall.active_backend.upper()}]"
+        mode_color = self.C_WARN if self.firewall.dry_run else self.C_ALERT
+
         stdscr.attron(curses.color_pair(self.C_HEADER) | curses.A_BOLD)
         stdscr.addstr(0, 0, " " * (max_x - 1))
         stdscr.addstr(0, 2, title)
         stdscr.attroff(curses.color_pair(self.C_HEADER) | curses.A_BOLD)
-        stdscr.addstr(0, max_x - len(mode_str) - 2, mode_str, curses.color_pair(self.C_WARN) | curses.A_BOLD)
+
+        with self._analytics_lock:
+            data = self._stats_data
+            is_loading = self._stats_loading
+
+        status_tag = " [ACTUALIZANDO...] " if is_loading else ""
+        header_right = f"{status_tag}{mode_str}"
+        if max_x - len(header_right) - 2 > len(title) + 3:
+            if is_loading:
+                tag_x = max_x - len(header_right) - 2
+                stdscr.addstr(0, tag_x, status_tag, curses.color_pair(self.C_INFO) | curses.A_BOLD)
+                stdscr.addstr(0, tag_x + len(status_tag), mode_str, curses.color_pair(mode_color) | curses.A_BOLD)
+            else:
+                stdscr.addstr(0, max_x - len(mode_str) - 2, mode_str, curses.color_pair(mode_color) | curses.A_BOLD)
 
         # Separator
         stdscr.addstr(1, 0, "─" * (max_x - 1), curses.color_pair(self.C_MUTED))
 
         # Help bar
-        help_text = " [ESC] Cerrar  [E] Actualizar "
+        help_text = " [ESC/E] Volver al panel principal   [R] Actualizar datos "
         stdscr.addstr(max_y - 2, 0, " " * (max_x - 1), curses.color_pair(self.C_MUTED))
-        stdscr.addstr(max_y - 2, 2, help_text, curses.color_pair(self.C_MUTED) | curses.A_BOLD)
+        stdscr.addstr(max_y - 2, 2, help_text[: max_x - 4], curses.color_pair(self.C_MUTED) | curses.A_BOLD)
 
-        # Check for error or loading
-        with self._analytics_lock:
-            data = self._stats_data
+        # First load check
+        if data is None and is_loading:
+            stdscr.addstr(3, 2, " Cargando estadísticas por primera vez...", curses.color_pair(self.C_INFO) | curses.A_BOLD)
+            stdscr.refresh()
+            return
 
-        if data is None or self._stats_loading:
-            loading_text = " Cargando estadísticas..."
-            stdscr.addstr(3, 2, loading_text, curses.color_pair(self.C_INFO) | curses.A_BOLD)
+        if data is None:
+            stdscr.addstr(3, 2, " Sin datos disponibles. Pulse [R] o [E] para cargar.", curses.color_pair(self.C_WARN))
             stdscr.refresh()
             return
 
         if "error" in data:
-            err_text = f" Error: {data['error']}"
-            stdscr.addstr(3, 2, err_text, curses.color_pair(self.C_ALERT))
+            stdscr.addstr(3, 2, f" Error al cargar estadísticas: {data['error']}", curses.color_pair(self.C_ALERT))
             stdscr.refresh()
             return
 
-        # Draw full-screen stats
-        self._draw_stats_screen_full(stdscr, max_y, max_x)
+        # Choose responsive layout
+        if max_x >= 80:
+            self._draw_stats_2col(stdscr, data, max_y, max_x)
+        else:
+            self._draw_stats_1col(stdscr, data, max_y, max_x)
 
-    def _draw_stats_column(self, stdscr, data, start_y, start_x, max_w, max_h, left: bool) -> None:
-        """Draws one column of the statistics screen."""
-        y = start_y
-        available_h = max_h - 1
+        stdscr.refresh()
 
-        # Overall stats
+    def _draw_stats_2col(self, stdscr, data: dict, max_y: int, max_x: int) -> None:
+        """Draws a responsive 2-column statistics view."""
+        start_y = 2
+        end_y = max_y - 3
+        avail_h = end_y - start_y + 1
+        if avail_h < 6:
+            return
+
+        col1_x = 1
+        col1_w = (max_x - 3) // 2
+        col2_x = col1_x + col1_w + 1
+        col2_w = max_x - col2_x - 1
+
         overall = data.get("overall", {})
         total_analyzed = overall.get("total_analyzed", 0)
-        total_attacks = overall.get("total_attacks", 0)
+        total_attacks = overall.get("total_attacks", overall.get("total_attacks_detected", 0))
+        session_attacks = overall.get("session_attacks", 0)
+        attack_rate = overall.get("attack_rate", 0.0)
+        total_404 = overall.get("total_404s", 0)
+        total_403 = overall.get("total_403s", 0)
+        active_bans = overall.get("active_bans", 0)
+        total_banned = overall.get("total_banned", 0)
+        unique_ips = overall.get("unique_ips", 0)
+
+        # ----------------- Columna 1 (Izquierda) -----------------
+        # 1. Resumen General
+        box1_h = min(8, avail_h * 2 // 5)
+        stdscr.addstr(start_y, col1_x, "── RESUMEN GENERAL " + "─" * max(0, col1_w - 19), curses.color_pair(self.C_INFO) | curses.A_BOLD)
+        stat_rows = [
+            f"  Peticiones analizadas: {total_analyzed:,}",
+            f"  Ataques totales:       {total_attacks:,} (Sesión: {session_attacks:,})",
+            f"  Tasa de ataque:        {attack_rate:.1f}%",
+            f"  Errores HTTP 404/403:  {total_404:,} / {total_403:,}",
+            f"  IPs bloqueadas:        {active_bans:,} activas (Total: {total_banned:,})",
+            f"  IPs atacantes únicas:  {unique_ips:,}",
+        ]
+        for i, text in enumerate(stat_rows[: box1_h - 1]):
+            color = self.C_ALERT if "Ataques" in text and total_attacks > 0 else self.C_DEFAULT
+            if "Tasa" in text and attack_rate > 10.0:
+                color = self.C_WARN
+            stdscr.addstr(start_y + 1 + i, col1_x, text[:col1_w], color)
+
+        # 2. Categorías de Ataque
+        cat_y = start_y + box1_h
+        cat_avail_h = end_y - cat_y + 1
+        if cat_avail_h >= 3:
+            stdscr.addstr(cat_y, col1_x, "── CATEGORÍAS DE ATAQUE " + "─" * max(0, col1_w - 24), curses.color_pair(self.C_INFO) | curses.A_BOLD)
+            categories = data.get("categories", [])
+            if not categories:
+                stdscr.addstr(cat_y + 1, col1_x + 2, "Sin ataques registrados aún.", curses.color_pair(self.C_MUTED))
+            else:
+                cat_colors = {
+                    "credentials": self.C_ALERT,
+                    "webshell": self.C_ALERT,
+                    "traversal": self.C_ALERT,
+                    "rate_limit": self.C_WARN,
+                    "heuristic": self.C_WARN,
+                    "user": self.C_WARN,
+                    "forbidden": self.C_INFO,
+                    "probe": self.C_DEFAULT,
+                    "exploit": self.C_ALERT,
+                }
+                max_items = cat_avail_h - 1
+                for i, (cat, count, pct) in enumerate(categories[:max_items]):
+                    row_y = cat_y + 1 + i
+                    if row_y > end_y:
+                        break
+                    cat_label = cat.replace("_", " ").title()
+                    pct_str = f"{pct:.1f}%"
+                    bar_space = max(2, col1_w - 30)
+                    bar_len = max(1, int(pct * bar_space / 100)) if pct > 0 else 0
+                    bar = "█" * bar_len
+                    color = cat_colors.get(cat.lower(), self.C_DEFAULT)
+                    line = f"  {cat_label:<14s} {count:>6d}  {pct_str:>6s}  {bar}"
+                    stdscr.addstr(row_y, col1_x, line[:col1_w], color)
+
+        # ----------------- Columna 2 (Derecha) -----------------
+        # Dynamic height distribution for right column
+        h_ips = max(4, min(8, avail_h * 2 // 5))
+        h_rules = max(4, min(6, (avail_h - h_ips) // 2))
+
+        # 3. Top IPs Atacantes
+        ip_y = start_y
+        stdscr.addstr(ip_y, col2_x, "── TOP IPs ATACANTES " + "─" * max(0, col2_w - 21), curses.color_pair(self.C_INFO) | curses.A_BOLD)
+        top_ips = data.get("top_ips", [])
+        if not top_ips:
+            stdscr.addstr(ip_y + 1, col2_x + 2, "Sin IPs atacantes registradas.", curses.color_pair(self.C_MUTED))
+        else:
+            for i, (ip, count, pct) in enumerate(top_ips[: h_ips - 1]):
+                row_y = ip_y + 1 + i
+                if row_y >= ip_y + h_ips or row_y > end_y:
+                    break
+                pct_str = f"{pct:.1f}%"
+                line = f"  {ip:<18s} {count:>6d}  {pct_str:>6s}"
+                stdscr.addstr(row_y, col2_x, line[:col2_w], self.C_ALERT)
+
+        # 4. Top Reglas Activadas
+        rule_y = ip_y + h_ips
+        if end_y - rule_y >= 3:
+            stdscr.addstr(rule_y, col2_x, "── TOP REGLAS ACTIVAS " + "─" * max(0, col2_w - 22), curses.color_pair(self.C_INFO) | curses.A_BOLD)
+            top_rules = data.get("top_rules", [])
+            if not top_rules:
+                stdscr.addstr(rule_y + 1, col2_x + 2, "Sin reglas activadas.", curses.color_pair(self.C_MUTED))
+            else:
+                for i, (rule, count, pct) in enumerate(top_rules[: h_rules - 1]):
+                    row_y = rule_y + 1 + i
+                    if row_y >= rule_y + h_rules or row_y > end_y:
+                        break
+                    pct_str = f"{pct:.1f}%"
+                    rule_w = max(10, col2_w - 18)
+                    rule_display = (rule[: rule_w - 2] + "..") if len(rule) > rule_w else rule
+                    line = f"  {rule_display:<{rule_w}s} {count:>5d} {pct_str:>5s}"
+                    stdscr.addstr(row_y, col2_x, line[:col2_w], self.C_SUCCESS)
+
+        # 5. Geolocalización por País
+        geo_y = rule_y + h_rules
+        if end_y - geo_y >= 3:
+            stdscr.addstr(geo_y, col2_x, "── GEOLOCALIZACIÓN " + "─" * max(0, col2_w - 19), curses.color_pair(self.C_INFO) | curses.A_BOLD)
+            geo = data.get("geolocation", [])
+            if not geo:
+                stdscr.addstr(geo_y + 1, col2_x + 2, "Sin datos de geolocalización.", curses.color_pair(self.C_MUTED))
+            else:
+                for i, (country, count, pct, ips) in enumerate(geo):
+                    row_y = geo_y + 1 + i
+                    if row_y > end_y:
+                        break
+                    pct_str = f"{pct:.1f}%"
+                    ip_count = len(ips) if ips else 0
+                    c_tag = "Otros" if country == "XX" else country
+                    line = f"  {c_tag:<6s} {count:>6d}  {pct_str:>6s}  {ip_count} IPs"
+                    stdscr.addstr(row_y, col2_x, line[:col2_w], self.C_WARN)
+
+    def _draw_stats_1col(self, stdscr, data: dict, max_y: int, max_x: int) -> None:
+        """Draws a responsive single-column statistics view for narrow terminals."""
+        start_y = 2
+        end_y = max_y - 3
+        avail_h = end_y - start_y + 1
+        max_w = max_x - 2
+
+        overall = data.get("overall", {})
+        total_analyzed = overall.get("total_analyzed", 0)
+        total_attacks = overall.get("total_attacks", overall.get("total_attacks_detected", 0))
+        session_attacks = overall.get("session_attacks", 0)
         attack_rate = overall.get("attack_rate", 0.0)
         total_404 = overall.get("total_404s", 0)
         total_403 = overall.get("total_403s", 0)
 
-        box_h = min(6, available_h)
-        if box_h < 4:
-            return
+        # 1. Resumen General
+        y = start_y
+        stdscr.addstr(y, 1, "── RESUMEN GENERAL ──────────────────────────────────────"[:max_w], curses.color_pair(self.C_INFO) | curses.A_BOLD)
+        y += 1
 
-        # Box header
-        header_text = " RESUMEN GENERAL "
-        stdscr.attron(curses.color_pair(self.C_INFO) | curses.A_BOLD)
-        stdscr.addstr(start_y, start_x, " " * max_w)
-        if left:
-            stdscr.addstr(start_y, start_x + 1, header_text)
-        else:
-            center_x = start_x + (max_w - len(header_text)) // 2
-            stdscr.addstr(start_y, center_x, header_text)
-        stdscr.attroff(curses.color_pair(self.C_INFO) | curses.A_BOLD)
-
-        # Box border
-        for i in range(1, box_h):
-            if start_y + i <= start_y + box_h - 1:
-                stdscr.addstr(start_y + i, start_x, "│", curses.color_pair(self.C_MUTED))
-                if start_x + max_w - 1 < 200:
-                    stdscr.addstr(start_y + i, start_x + max_w - 1, "│", curses.color_pair(self.C_MUTED))
-
-        # Bottom border
-        stdscr.addstr(start_y + box_h - 1, start_x, "─" * max_w, curses.color_pair(self.C_MUTED))
-
-        # Stats lines
         stat_lines = [
-            (f"Peticiones analizadas: {total_analyzed:,}", self.C_DEFAULT),
-            (f"Ataques detectados:    {total_attacks:,}", self.C_ALERT if total_attacks > 0 else self.C_DEFAULT),
-            (f"Tasa de ataque:        {attack_rate:.1f}%", self.C_WARN if attack_rate > 10 else self.C_SUCCESS),
-            (f"Errores 404:           {total_404:,}", self.C_DEFAULT),
-            (f"Errores 403:           {total_403:,}", self.C_DEFAULT),
+            f"  Peticiones analizadas: {total_analyzed:,}",
+            f"  Ataques totales:       {total_attacks:,} (Sesión: {session_attacks:,})",
+            f"  Tasa de ataque:        {attack_rate:.1f}%",
+            f"  Errores 404 / 403:     {total_404:,} / {total_403:,}",
         ]
-
-        for i, (text, color) in enumerate(stat_lines):
-            ly = start_y + i + 1
-            if ly < start_y + box_h - 1:
-                stdscr.addstr(ly, start_x + 1, text[:max_w - 2], color)
-
-        # Category breakdown (if space)
-        categories = data.get("categories", [])
-        if categories and available_h > box_h + 2:
-            cat_y = start_y + box_h + 1
-            cat_h = min(8, available_h - (cat_y - start_y))
-            if cat_h >= 3:
-                cat_header = " CATEGORÍAS "
-                stdscr.attron(curses.color_pair(self.C_INFO) | curses.A_BOLD)
-                stdscr.addstr(cat_y, start_x, " " * max_w)
-                if left:
-                    stdscr.addstr(cat_y, start_x + 1, cat_header)
-                else:
-                    center_x = start_x + (max_w - len(cat_header)) // 2
-                    stdscr.addstr(cat_y, center_x, cat_header)
-                stdscr.attroff(curses.color_pair(self.C_INFO) | curses.A_BOLD)
-                stdscr.addstr(cat_y + cat_h - 1, start_x, "─" * max_w, curses.color_pair(self.C_MUTED))
-
-                cat_colors = {
-                    "credentials": self.C_ALERT,
-                    "webshell": self.C_ALERT,
-                    "traversal": self.C_ALERT,
-                    "rate_limit": self.C_WARN,
-                    "heuristic": self.C_WARN,
-                    "user": self.C_WARN,
-                    "forbidden": self.C_INFO,
-                    "probe": self.C_DEFAULT,
-                }
-
-                for i, (cat, count, pct) in enumerate(categories[:cat_h - 2]):
-                    cy = cat_y + i + 1
-                    if cy < cat_y + cat_h - 1:
-                        cat_label = cat.replace("_", " ").title()
-                        pct_str = f"{pct:.1f}%"
-                        bar_len = max(5, int(pct * (max_w - 40) / 100))
-                        bar = "█" * bar_len
-                        color = cat_colors.get(cat, self.C_DEFAULT)
-                        line = f"  {cat_label:<18s} {count:>6d}  {pct_str:>6s}  {bar}"
-                        stdscr.addstr(cy, start_x + 1, line[:max_w - 2], color)
-
-        # Top IPs (if space and right column)
-        if not left:
-            top_ips = data.get("top_ips", [])
-            if top_ips and available_h > box_h + 2:
-                ip_y = start_y + box_h + 1
-                ip_h = min(8, available_h - (ip_y - start_y))
-                if ip_h >= 3:
-                    ip_header = " TOP 10 IPs "
-                    stdscr.attron(curses.color_pair(self.C_INFO) | curses.A_BOLD)
-                    stdscr.addstr(ip_y, start_x, " " * max_w)
-                    stdscr.addstr(ip_y, start_x + 1, ip_header)
-                    stdscr.attroff(curses.color_pair(self.C_INFO) | curses.A_BOLD)
-                    stdscr.addstr(ip_y + ip_h - 1, start_x, "─" * max_w, curses.color_pair(self.C_MUTED))
-
-                    for i, (ip, count, pct) in enumerate(top_ips[:ip_h - 2]):
-                        iy = ip_y + i + 1
-                        if iy < ip_y + ip_h - 1:
-                            pct_str = f"{pct:.1f}%"
-                            line = f"  {ip:<22s} {count:>6d}  {pct_str:>6s}"
-                            stdscr.addstr(iy, start_x + 1, line[:max_w - 2], self.C_ALERT)
-
-        # Geolocation (if space and left column)
-        if left:
-            geo = data.get("geolocation", [])
-            if geo and available_h > box_h + 2:
-                geo_y = start_y + box_h + 1
-                geo_h = min(8, available_h - (geo_y - start_y))
-                if geo_h >= 3:
-                    geo_header = " GEOLOCALIZACIÓN "
-                    stdscr.attron(curses.color_pair(self.C_INFO) | curses.A_BOLD)
-                    stdscr.addstr(geo_y, start_x, " " * max_w)
-                    stdscr.addstr(geo_y, start_x + 1, geo_header)
-                    stdscr.attroff(curses.color_pair(self.C_INFO) | curses.A_BOLD)
-                    stdscr.addstr(geo_y + geo_h - 1, start_x, "─" * max_w, curses.color_pair(self.C_MUTED))
-
-                    for i, (country, count, pct, ips) in enumerate(geo[:geo_h - 2]):
-                        gy = geo_y + i + 1
-                        if gy < geo_y + geo_h - 1:
-                            pct_str = f"{pct:.1f}%"
-                            ip_count = len(ips) if ips else 0
-                            line = f"  {country:<6s} {count:>6d}  {pct_str:>6s}  {ip_count} IPs"
-                            stdscr.addstr(gy, start_x + 1, line[:max_w - 2], self.C_WARN)
-
-    def _draw_stats_screen_full(self, stdscr, max_y: int, max_x: int) -> None:
-        """Fallback: draws statistics in full-screen single column mode."""
-        stdscr.erase()
-
-        title = " UTILSEC SENTINEL - ESTADÍSTICAS "
-        mode_str = f"[SIMULACIÓN]" if self.firewall.dry_run else f"[EN VIVO: {self.firewall.active_backend.upper()}]"
-        stdscr.attron(curses.color_pair(self.C_HEADER) | curses.A_BOLD)
-        stdscr.addstr(0, 0, " " * (max_x - 1))
-        stdscr.addstr(0, 2, title)
-        stdscr.attroff(curses.color_pair(self.C_HEADER) | curses.A_BOLD)
-        stdscr.addstr(0, max_x - len(mode_str) - 2, mode_str, curses.color_pair(self.C_WARN) | curses.A_BOLD)
-        stdscr.addstr(1, 0, "─" * (max_x - 1), curses.color_pair(self.C_MUTED))
-
-        with self._analytics_lock:
-            data = self._stats_data
-
-        if data is None or self._stats_loading:
-            stdscr.addstr(3, 2, " Cargando estadísticas...", curses.color_pair(self.C_INFO) | curses.A_BOLD)
-            stdscr.refresh()
-            return
-
-        help_text = " [ESC] Cerrar  [E] Actualizar "
-        stdscr.addstr(max_y - 2, 0, " " * (max_x - 1), curses.color_pair(self.C_MUTED))
-        stdscr.addstr(max_y - 2, 2, help_text, curses.color_pair(self.C_MUTED) | curses.A_BOLD)
-
-        y = 3
-        max_w = max_x - 4
-
-        if "error" in data:
-            stdscr.addstr(y, 2, f" Error: {data['error']}", curses.color_pair(self.C_ALERT))
-            stdscr.refresh()
-            return
-
-        # Overall stats box
-        overall = data.get("overall", {})
-        box_h = min(7, max_y - 10)
-        lines = [
-            "── RESUMEN GENERAL ───────────────────────────────────────",
-            f"  Peticiones analizadas: {overall.get('total_analyzed', 0):,}",
-            f"  Ataques detectados:    {overall.get('total_attacks', 0):,}",
-            f"  Tasa de ataque:        {overall.get('attack_rate', 0.0):.1f}%",
-            f"  Errores 404:           {overall.get('total_404s', 0):,}",
-            f"  Errores 403:           {overall.get('total_403s', 0):,}",
-        ]
-        for i, line in enumerate(lines[:box_h]):
-            if y + i < max_y - 4:
-                color = self.C_WARN if "Tasa" in line and float(overall.get("attack_rate", 0)) > 10 else self.C_DEFAULT
-                stdscr.addstr(y + i, 1, line[:max_w], color)
-        y += box_h + 1
-
-        # Categories
-        categories = data.get("categories", [])
-        if categories:
-            cat_h = min(10, max_y - y - 15)
-            if cat_h > 0:
-                stdscr.addstr(y, 1, "── CATEGORÍAS DE ATAQUE ─────────────────────────────────", curses.color_pair(self.C_INFO))
-                y += 1
-                cat_colors = {
-                    "credentials": self.C_ALERT,
-                    "webshell": self.C_ALERT,
-                    "traversal": self.C_ALERT,
-                    "rate_limit": self.C_WARN,
-                    "heuristic": self.C_WARN,
-                    "user": self.C_WARN,
-                    "forbidden": self.C_INFO,
-                    "probe": self.C_DEFAULT,
-                }
-                for cat, count, pct in categories[:cat_h]:
-                    if y < max_y - 12:
-                        cat_label = cat.replace("_", " ").title()
-                        bar_len = max(3, int(pct * (max_w - 50) / 100))
-                        bar = "█" * bar_len
-                        color = cat_colors.get(cat, self.C_DEFAULT)
-                        line = f"  {cat_label:<18s} {count:>6d}  {pct:>6.1f}%  {bar}"
-                        stdscr.addstr(y, 2, line[:max_w], color)
-                        y += 1
+        for line in stat_lines:
+            if y <= end_y:
+                stdscr.addstr(y, 1, line[:max_w], self.C_ALERT if "Ataques" in line and total_attacks > 0 else self.C_DEFAULT)
                 y += 1
 
-        # Top IPs
+        y += 1
+        # 2. Categorías
+        categories = data.get("categories", [])
+        if categories and y <= end_y - 3:
+            stdscr.addstr(y, 1, "── CATEGORÍAS DE ATAQUE ─────────────────────────────────"[:max_w], curses.color_pair(self.C_INFO) | curses.A_BOLD)
+            y += 1
+            for cat, count, pct in categories[: min(5, end_y - y)]:
+                cat_label = cat.replace("_", " ").title()
+                line = f"  {cat_label:<16s} {count:>6d}  {pct:>6.1f}%"
+                stdscr.addstr(y, 1, line[:max_w], self.C_WARN)
+                y += 1
+
+        y += 1
+        # 3. Top IPs
         top_ips = data.get("top_ips", [])
-        if top_ips:
-            ip_h = min(10, max_y - y - 12)
-            if ip_h > 0:
-                stdscr.addstr(y, 1, "── TOP 10 IPs ATACANTES ─────────────────────────────────", curses.color_pair(self.C_INFO))
+        if top_ips and y <= end_y - 2:
+            stdscr.addstr(y, 1, "── TOP IPs ATACANTES ────────────────────────────────────"[:max_w], curses.color_pair(self.C_INFO) | curses.A_BOLD)
+            y += 1
+            for ip, count, pct in top_ips[: min(5, end_y - y)]:
+                line = f"  {ip:<18s} {count:>6d}  {pct:>6.1f}%"
+                stdscr.addstr(y, 1, line[:max_w], self.C_ALERT)
                 y += 1
-                for ip, count, pct in top_ips[:ip_h]:
-                    if y < max_y - 10:
-                        pct_str = f"{pct:.1f}%"
-                        line = f"  {ip:<22s} {count:>6d}  {pct_str:>6s}"
-                        stdscr.addstr(y, 2, line[:max_w], self.C_ALERT)
-                        y += 1
-                y += 1
-
-        # Geolocation
-        geo = data.get("geolocation", [])
-        if geo:
-            geo_h = min(10, max_y - y - 8)
-            if geo_h > 0:
-                stdscr.addstr(y, 1, "── GEOLOCALIZACIÓN POR PAÍS ─────────────────────────────", curses.color_pair(self.C_INFO))
-                y += 1
-                for country, count, pct, ips in geo[:geo_h]:
-                    if y < max_y - 6:
-                        pct_str = f"{pct:.1f}%"
-                        ip_count = len(ips) if ips else 0
-                        line = f"  {country:<6s} {count:>6d}  {pct_str:>6s}  {ip_count} IPs únicas"
-                        stdscr.addstr(y, 2, line[:max_w], self.C_WARN)
-                        y += 1
-
-        # Top rules
-        top_rules = data.get("top_rules", [])
-        if top_rules:
-            rule_h = min(8, max_y - y - 4)
-            if rule_h > 0:
-                stdscr.addstr(y, 1, "── TOP 10 REGLAS MÁS ACTIVAS ────────────────────────────", curses.color_pair(self.C_INFO))
-                y += 1
-                for rule, count, pct in top_rules[:rule_h]:
-                    if y < max_y - 3:
-                        pct_str = f"{pct:.1f}%"
-                        line = f"  {rule:<30s} {count:>6d}  {pct_str:>6s}"
-                        stdscr.addstr(y, 2, line[:max_w], self.C_SUCCESS)
-                        y += 1
-
-        stdscr.refresh()

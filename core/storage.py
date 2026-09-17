@@ -184,6 +184,52 @@ class StorageManager:
                 "total_events": total_events
             }
 
+    def get_analytics_summary(self, top_n: int = 10, hours: int = 24) -> Dict:
+        """Returns pre-aggregated analytics data directly from SQLite for high performance."""
+        import time
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM events")
+            total_events = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(DISTINCT ip) FROM events")
+            unique_ips = cursor.fetchone()[0]
+
+            cursor.execute("SELECT category, COUNT(*) FROM events WHERE category IS NOT NULL GROUP BY category ORDER BY 2 DESC")
+            categories = [(row[0], row[1]) for row in cursor.fetchall()]
+
+            cursor.execute("SELECT ip, COUNT(*) FROM events WHERE ip IS NOT NULL GROUP BY ip ORDER BY 2 DESC LIMIT ?", (top_n,))
+            top_ips = [(row[0], row[1]) for row in cursor.fetchall()]
+
+            cursor.execute("SELECT matched_rule, COUNT(*) FROM events WHERE matched_rule IS NOT NULL GROUP BY matched_rule ORDER BY 2 DESC LIMIT ?", (top_n,))
+            top_rules = [(row[0], row[1]) for row in cursor.fetchall()]
+
+            cutoff = time.time() - (hours * 3600)
+            cursor.execute("""
+                SELECT strftime('%Y-%m-%d %H:00', timestamp, 'unixepoch') as hr, COUNT(*)
+                FROM events
+                WHERE timestamp >= ?
+                GROUP BY hr
+                ORDER BY hr ASC
+            """, (cutoff,))
+            hourly = {row[0]: row[1] for row in cursor.fetchall()}
+
+            cursor.execute("SELECT COUNT(*) FROM bans WHERE status IN ('BANNED', 'SIMULATED')")
+            active_bans = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM bans")
+            total_banned = cursor.fetchone()[0]
+
+            return {
+                "total_events": total_events,
+                "unique_ips": unique_ips,
+                "categories": categories,
+                "top_ips": top_ips,
+                "top_rules": top_rules,
+                "hourly": hourly,
+                "active_bans": active_bans,
+                "total_banned": total_banned,
+            }
+
     # --- Log Configuration Persistence ---
 
     def save_log_config(self, logs: List[Dict[str, str]]) -> None:

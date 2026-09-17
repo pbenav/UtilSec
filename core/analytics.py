@@ -19,26 +19,30 @@ logger = logging.getLogger("UtilSec.Analytics")
 
 
 class AttackAnalytics:
-    """Collects and calculates attack statistics from detector and attack events."""
+    """Collects and calculates attack statistics from detector, attack events, and storage."""
 
     def __init__(
         self,
         detector,
         recent_attacks: Deque[AttackEvent],
         screen_attacks: Dict[str, Deque[AttackEvent]],
+        storage=None,
     ) -> None:
         self.detector = detector
         self.recent_attacks = recent_attacks
         self.screen_attacks = screen_attacks
+        self.storage = storage
 
         # Geolocation cache: ip -> country_code
         self._geo_cache: Dict[str, str] = {}
         self._geo_cache_lock = threading.Lock()
         self._geo_cache_ttl: Dict[str, float] = {}
         self._geo_cache_ttl_lock = threading.Lock()
+        self._geo_resolving_ips: set = set()
+        self._geo_resolving_lock = threading.Lock()
 
-        # Time-to-live for cache entries (5 minutes)
-        self._geo_ttl_seconds = 300
+        # Time-to-live for cache entries (24 hours for valid geo)
+        self._geo_ttl_seconds = 86400
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -49,13 +53,13 @@ class AttackAnalytics:
         seen: set = set()
         attacks: List[AttackEvent] = []
         for ev in self.recent_attacks:
-            key = (ev.ip, ev.url, ev.timestamp.isoformat())
+            key = (ev.ip, ev.url, ev.timestamp.isoformat() if hasattr(ev.timestamp, "isoformat") else str(ev.timestamp))
             if key not in seen:
                 seen.add(key)
                 attacks.append(ev)
         for screen_deque in self.screen_attacks.values():
             for ev in screen_deque:
-                key = (ev.ip, ev.url, ev.timestamp.isoformat())
+                key = (ev.ip, ev.url, ev.timestamp.isoformat() if hasattr(ev.timestamp, "isoformat") else str(ev.timestamp))
                 if key not in seen:
                     seen.add(key)
                     attacks.append(ev)
@@ -72,21 +76,60 @@ class AttackAnalytics:
     # ------------------------------------------------------------------
 
     def get_overall_stats(self) -> dict:
-        """Return overall statistics dict."""
-        total_attacks = self.detector.total_attacks_detected
-        total_analyzed = self.detector.total_analyzed
-        attack_rate = self._safe_percentage(total_attacks, total_analyzed)
+        """Return overall statistics dict with session and historical metrics."""
+        session_attacks = self.detector.total_attacks_detected
+        session_analyzed = self.detector.total_analyzed
+        session_404s = self.detector.total_404s
+        session_403s = self.detector.total_403s
+
+        total_events = session_attacks
+        active_bans = 0
+        total_banned = 0
+        unique_ips = 0
+
+        if self.storage:
+            try:
+                summary = self.storage.get_analytics_summary()
+                total_events = max(session_attacks, summary.get("total_events", 0))
+                active_bans = summary.get("active_bans", 0)
+                total_banned = summary.get("total_banned", 0)
+                unique_ips = summary.get("unique_ips", 0)
+            except Exception:
+                pass
+        else:
+            all_attacks = self._get_all_attacks()
+            total_events = max(session_attacks, len(all_attacks))
+            unique_ips = len(set(ev.ip for ev in all_attacks))
+
+        attack_rate = self._safe_percentage(session_attacks, session_analyzed)
 
         return {
-            "total_analyzed": total_analyzed,
-            "total_attacks_detected": total_attacks,
+            "total_analyzed": session_analyzed,
+            "total_attacks": total_events,
+            "total_attacks_detected": total_events,
+            "session_attacks": session_attacks,
             "attack_rate": attack_rate,
-            "total_404s": self.detector.total_404s,
-            "total_403s": self.detector.total_403s,
+            "total_404s": session_404s,
+            "total_403s": session_403s,
+            "active_bans": active_bans,
+            "total_banned": total_banned,
+            "unique_ips": unique_ips,
         }
 
     def get_category_breakdown(self) -> List[Tuple[str, int, float]]:
         """Return list of (category, count, percentage) sorted by count descending."""
+        if self.storage:
+            try:
+                summary = self.storage.get_analytics_summary()
+                if summary.get("total_events", 0) > 0:
+                    total = summary["total_events"]
+                    return [
+                        (cat, cnt, self._safe_percentage(cnt, total))
+                        for cat, cnt in summary.get("categories", [])
+                    ]
+            except Exception:
+                pass
+
         attacks = self._get_all_attacks()
         counter: Counter = Counter(ev.category for ev in attacks)
         total = sum(counter.values())
@@ -97,6 +140,18 @@ class AttackAnalytics:
 
     def get_top_ips(self, top_n: int = 10) -> List[Tuple[str, int, float]]:
         """Return list of (ip, count, percentage) sorted by count descending."""
+        if self.storage:
+            try:
+                summary = self.storage.get_analytics_summary(top_n=top_n)
+                if summary.get("total_events", 0) > 0:
+                    total = summary["total_events"]
+                    return [
+                        (ip, cnt, self._safe_percentage(cnt, total))
+                        for ip, cnt in summary.get("top_ips", [])
+                    ]
+            except Exception:
+                pass
+
         attacks = self._get_all_attacks()
         counter: Counter = Counter(ev.ip for ev in attacks)
         total = sum(counter.values())
@@ -107,6 +162,18 @@ class AttackAnalytics:
 
     def get_top_rules(self, top_n: int = 10) -> List[Tuple[str, int, float]]:
         """Return list of (rule_name, count, percentage) sorted by count descending."""
+        if self.storage:
+            try:
+                summary = self.storage.get_analytics_summary(top_n=top_n)
+                if summary.get("total_events", 0) > 0:
+                    total = summary["total_events"]
+                    return [
+                        (rule, cnt, self._safe_percentage(cnt, total))
+                        for rule, cnt in summary.get("top_rules", [])
+                    ]
+            except Exception:
+                pass
+
         attacks = self._get_all_attacks()
         counter: Counter = Counter(ev.matched_rule for ev in attacks)
         total = sum(counter.values())
@@ -116,7 +183,22 @@ class AttackAnalytics:
         ]
 
     def get_hourly_evolution(self, hours: int = 24) -> Dict[str, int]:
-        """Return dict of {hour_str: count} for the last N hours based on event timestamps."""
+        """Return dict of {hour_str: count} for the last N hours."""
+        if self.storage:
+            try:
+                summary = self.storage.get_analytics_summary(hours=hours)
+                hourly_data = summary.get("hourly", {})
+                if hourly_data:
+                    now = datetime.now()
+                    result: Dict[str, int] = {}
+                    for h in range(hours):
+                        dt = now - timedelta(hours=h)
+                        k = dt.strftime("%Y-%m-%d %H:00")
+                        result[k] = hourly_data.get(k, 0)
+                    return result
+            except Exception:
+                pass
+
         now = datetime.now()
         cutoff = now - timedelta(hours=hours)
         attacks = self._get_all_attacks()
@@ -141,44 +223,31 @@ class AttackAnalytics:
     def get_geolocation_stats(self, top_n: int = 10) -> List[Tuple[str, int, float, List[str]]]:
         """Return list of (country_code, count, percentage, [ips]) sorted by count descending.
 
-        Uses the RIPE NCC Statistics API to resolve country codes for the top attacking IPs.
-        Results are cached in memory to avoid repeated API calls.
+        Non-blocking: reads from in-memory cache immediately.
+        Missing IPs are queued for asynchronous background resolution.
         """
-        top_ips = self.get_top_ips(top_n * 3)  # fetch more to account for failed lookups
+        top_ips = self.get_top_ips(top_n * 2)
         if not top_ips:
             return []
 
-        # Resolve geolocations concurrently
-        ip_results: Dict[str, str] = {}
-        lock = threading.Lock()
-        errors: List[str] = []
-
-        def _lookup(ip: str) -> None:
-            code = self._resolve_country(ip)
-            with lock:
-                ip_results[ip] = code
-
-        threads: List[threading.Thread] = []
-        for ip, _, _ in top_ips:
-            t = threading.Thread(target=_lookup, args=(ip,), daemon=True)
-            threads.append(t)
-            t.start()
-
-        for t in threads:
-            t.join(timeout=10)
-
-        if errors:
-            logger.debug("Geolocation errors: %s", errors[:5])
-
-        # Group by country
         country_data: Dict[str, dict] = {}
+        missing_ips: List[str] = []
+
         for ip, count, pct in top_ips:
-            code = ip_results.get(ip, "XX")  # XX = unknown
+            code = self._get_cached_geo(ip)
+            if code is None:
+                code = "XX"
+                missing_ips.append(ip)
+
             if code not in country_data:
                 country_data[code] = {"count": 0, "ips": []}
             country_data[code]["count"] += count
             if ip not in country_data[code]["ips"]:
                 country_data[code]["ips"].append(ip)
+
+        # Trigger background resolution for missing IPs without blocking
+        if missing_ips:
+            self._queue_geo_lookups(missing_ips)
 
         total = sum(d["count"] for d in country_data.values())
         result = [
@@ -203,28 +272,33 @@ class AttackAnalytics:
     # Geolocation helpers
     # ------------------------------------------------------------------
 
-    def _resolve_country(self, ip: str) -> str:
-        """Resolve country code for an IP using RIPE NCC Statistics API.
+    def _queue_geo_lookups(self, ips: List[str]) -> None:
+        """Trigger background resolution for IPs not yet cached or currently resolving."""
+        with self._geo_resolving_lock:
+            to_resolve = [ip for ip in ips if ip not in self._geo_resolving_ips]
+            for ip in to_resolve:
+                self._geo_resolving_ips.add(ip)
 
-        Uses in-memory cache with TTL to avoid repeated API calls.
-        Returns 'XX' for unknown/unresolvable IPs.
-        """
-        # Check in-memory cache first
-        cached = self._get_cached_geo(ip)
-        if cached is not None:
-            return cached
+        if not to_resolve:
+            return
 
-        # Try RIPE NCC API
-        code = self._query_ripe_ncc(ip)
+        def _worker():
+            for ip in to_resolve:
+                try:
+                    code = self._query_ripe_ncc(ip)
+                    if code:
+                        self._set_cached_geo(ip, code)
+                    else:
+                        # Cache negative for 10 minutes to avoid repeatedly hammering network
+                        self._set_cached_geo(ip, "XX", ttl=600)
+                except Exception:
+                    self._set_cached_geo(ip, "XX", ttl=600)
+                finally:
+                    with self._geo_resolving_lock:
+                        self._geo_resolving_ips.discard(ip)
 
-        # Cache the result (even failures, but with shorter TTL)
-        if code:
-            self._set_cached_geo(ip, code)
-        else:
-            # Cache failures briefly (30s)
-            self._set_cached_geo(ip, "XX")
-
-        return code if code else "XX"
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
 
     def _get_cached_geo(self, ip: str) -> Optional[str]:
         """Return cached country code or None if not cached / expired."""
@@ -242,43 +316,27 @@ class AttackAnalytics:
 
         return code
 
-    def _set_cached_geo(self, ip: str, code: str) -> None:
+    def _set_cached_geo(self, ip: str, code: str, ttl: Optional[float] = None) -> None:
         """Store a geolocation result in the cache."""
+        duration = ttl if ttl is not None else self._geo_ttl_seconds
         with self._geo_cache_lock:
             self._geo_cache[ip] = code
         with self._geo_cache_ttl_lock:
-            self._geo_cache_ttl[ip] = time.time() + self._geo_ttl_seconds
+            self._geo_cache_ttl[ip] = time.time() + duration
 
     def _query_ripe_ncc(self, ip: str) -> Optional[str]:
-        """Query RIPE NCC Statistics API for country information.
-
-        The RIPE NCC API returns data like:
-          {
-            "response": {
-              "ripe_status": "OK",
-              "data": {
-                "route": {"origin_asn": "ASxxxx"},
-                "route_object": {"origin": "ASxxxx"},
-                "notice": {"title": "..."}
-              },
-              "geo": {"country": "ES"}
-            }
-          }
-
-        Fallback: use reverse DNS lookup.
-        """
+        """Query RIPE NCC Statistics API for country information with strict fast timeout."""
         url = f"https://stat.ripe.net/data/geo-data/api.json?resource={ip}"
         try:
             req = Request(url, method="GET")
             req.add_header("Accept", "application/json")
             req.add_header("User-Agent", "UtilSec-Sentinel/1.0")
 
-            with urlopen(req, timeout=5) as resp:
+            with urlopen(req, timeout=2.0) as resp:
                 if resp.status != 200:
                     return None
                 body = json.loads(resp.read().decode("utf-8"))
 
-            # Parse the JSON response
             response_data = body.get("response", {})
             geo = response_data.get("geo", {})
             country = geo.get("country")
@@ -286,55 +344,13 @@ class AttackAnalytics:
             if country and isinstance(country, str):
                 return country.upper()
 
-            # Some versions of the API put country info differently
             notice = response_data.get("notice", {})
             title = notice.get("title", "")
-            if "Spain" in title:
-                return "ES"
-            if "Russia" in title:
-                return "RU"
-            if "China" in title:
-                return "CN"
-            if "United States" in title:
-                return "US"
+            for c_name, c_code in [("Spain", "ES"), ("Russia", "RU"), ("China", "CN"), ("United States", "US")]:
+                if c_name in title:
+                    return c_code
 
             return None
-
-        except (URLError, OSError, ValueError, KeyError, TypeError) as exc:
+        except Exception as exc:
             logger.debug("RIPE NCC API failed for %s: %s", ip, exc)
-            return self._fallback_dns_lookup(ip)
-
-    @staticmethod
-    def _fallback_dns_lookup(ip: str) -> Optional[str]:
-        """Fallback: try reverse DNS to guess country from TLD."""
-        try:
-            hostname = socket.gethostbyaddr(ip)[0]
-            if hostname.endswith(".ru"):
-                return "RU"
-            if hostname.endswith(".cn"):
-                return "CN"
-            if hostname.endswith(".us"):
-                return "US"
-            if hostname.endswith(".de"):
-                return "DE"
-            if hostname.endswith(".fr"):
-                return "FR"
-            if hostname.endswith(".br"):
-                return "BR"
-            if hostname.endswith(".jp"):
-                return "JP"
-            if hostname.endswith(".uk") or hostname.endswith(".co.uk"):
-                return "GB"
-            if hostname.endswith(".kr"):
-                return "KR"
-            if hostname.endswith(".in"):
-                return "IN"
-            if hostname.endswith(".it"):
-                return "IT"
-            if hostname.endswith(".nl"):
-                return "NL"
-            if hostname.endswith(".se"):
-                return "SE"
-        except (socket.herror, socket.gaierror, socket.timeout):
-            pass
-        return None
+            return None
