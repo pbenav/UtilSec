@@ -978,7 +978,7 @@ class SentinelTUI:
             "  & Automatic Firewall Ban Tool",
             "",
             "  Developed by Sientia Open Source Labs",
-            "  https://github.com/sientia",
+            "  https://github.com/pbenav",
             "",
             "  Licensed under GNU Affero General Public License v3.0 (AGPL-3.0)",
             "  Copyright (C) 2025-2026 Sientia Open Source Labs",
