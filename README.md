@@ -2,7 +2,7 @@
 
 **UtilSec Sentinel** es un monitor de seguridad y cortafuegos en tiempo real con interfaz de terminal interactiva (**TUI**) diseñado para analizar registros de servidores web (Apache / Nginx / PHP-FPM FastCGI), identificar atacantes y bloquear automáticamente sus direcciones IP.
 
-**Desarrollado por [Sientia Open Source Labs](https://github.com/sientia)**
+**Desarrollado por [Sientia Open Source Labs](https://github.com/pbenav)**
 
 > **¿Te gusta este proyecto?** Apoya el desarrollo de software libre y de código abierto:
 > - **[Patreon](https://www.patreon.com/cw/sientia)** — Suscripción mensual
