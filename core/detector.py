@@ -22,6 +22,7 @@ class AttackDetector:
         self.ip_403_history: Dict[str, Deque[float]] = collections.defaultdict(collections.deque)
         self.total_analyzed = 0
         self.total_404s = 0
+        self.total_403s = 0
         self.total_attacks_detected = 0
 
     def _compile_rules(self) -> None:
@@ -58,8 +59,10 @@ class AttackDetector:
         """
         self.total_analyzed += 1
 
-        if status_code in (404, 403):
+        if status_code == 404:
             self.total_404s += 1
+        elif status_code == 403:
+            self.total_403s += 1
 
         # Check whitelist first
         if self.config.is_ip_whitelisted(ip):
