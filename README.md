@@ -30,7 +30,7 @@ Consulta [LICENSE](LICENSE) para más detalles.
   - Tolerancia a cargas útiles (*payloads*) binarias, caracteres nulos y rotaciones automáticas de registros (`logrotate`).
   - Soporta simultáneamente registros de acceso combinado HTTP y registros de error FastCGI / Apache (`Primary script unknown`).
 - **Detección Inteligente en 3 Capas**:
-  1. **Reglas del Usuario**: Cadenas personalizables (ej. `/admin.php`, `/phpmyadmin`, `/wp-login.php`, `/xmlrpc.php`) editables desde `config.json` o sobre la marcha desde la TUI (`[A]`).
+  1. **Reglas del Usuario**: Cadenas personalizables (ej. `/admin.php`, `/phpmyadmin`, `/wp-login.php`, `/xmlrpc.php`) editables desde `config.json` o sobre la marcha desde la TUI (`[A]` para añadir, `[D]` para eliminar).
   2. **Firmas Heurísticas / IA de Bloqueo Inmediato (1 solo intento)**:
      - Fugas de credenciales: `/.env*`, `/.aws/credentials`, `/rclone.conf`, `/.vscode/sftp.json`, `wp-config.php`, `id_rsa`.
      - Fugas de repositorios: `/.git/`, `/.gitignore`, `/.DS_Store`.
@@ -47,7 +47,10 @@ Consulta [LICENSE](LICENSE) para más detalles.
   - Generación automática de scripts de auditoría: `banned_ips.sh` y `unban_ips.sh`.
   - Temporizador de desbloqueo automático (TTL) en segundo plano (por defecto 3600 segundos).
   - Lista blanca (*whitelist*) para IPs locales (`127.0.0.1`, RFC 1918) y rangos de red seguros (protegidas ante bloqueos de subred).
-  - Persistencia en base de datos SQLite (`sentinel_history.db`).
+- **Persistencia de Estado**:
+  - **Persistencia de Bans**: Los bloqueos se restauran automáticamente al reiniciar el proceso. Si existen reglas en iptables/ufw que no estaban en memoria, se recuperan conservando su tiempo original de expiración (TTL). Los bans expirados se marcan como `EXPIRED` y se eliminan de la memoria.
+  - **Persistencia de Configuración de Registros de Log**: Las rutas de archivos de log configuradas se guardan en SQLite y se cargan automáticamente al iniciar (a menos que se especifique con el parámetro `--log`).
+- **Persistencia en base de datos SQLite** (`sentinel_history.db`).
 
 ---
 
@@ -98,6 +101,7 @@ Ideal para ejecutar en servidores en segundo plano o como servicio `systemd`:
 | `[U]` | **Desbloquear** inmediatamente la subred/IP seleccionada |
 | `[B]` | **Bloquear** manualmente cualquier IP o subred (ej. `1.2.3.4` o `1.2.3.0/24`) |
 | `[A]` | **Añadir nueva regla/cadena de ataque** en caliente y guardarla en `config.json` |
+| `[D]` | **Eliminar regla/cadena de ataque** definida por el usuario |
 | `[M]` | **Cambiar modo** entre Simulación (Dry-Run) y Cortafuegos Real (Live) |
 | `[P]` | **Pausar / Reanudar** el flujo de eventos en pantalla |
 | `[C]` | **Limpiar** registros expirados de la vista |
@@ -141,4 +145,3 @@ El archivo `config.json` permite personalizar todos los parámetros:
 ```bash
 python3 -m unittest tests/test_sentinel.py
 ```
-
