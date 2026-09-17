@@ -51,6 +51,10 @@ Consulta [LICENSE](LICENSE) para más detalles.
   - **Persistencia de Bans**: Los bloqueos se restauran automáticamente al reiniciar el proceso. Si existen reglas en iptables/ufw que no estaban en memoria, se recuperan conservando su tiempo original de expiración (TTL). Los bans expirados se marcan como `EXPIRED` y se eliminan de la memoria.
   - **Persistencia de Configuración de Registros de Log**: Las rutas de archivos de log configuradas se guardan en SQLite y se cargan automáticamente al iniciar (a menos que se especifique con el parámetro `--log`).
 - **Persistencia en base de datos SQLite** (`sentinel_history.db`).
+- **Panel de Estadísticas y Geolocalización**:
+  - Pantalla dedicada accesible con `[E]` que muestra: tasa de ataque (%), distribución por categoría, top 10 IPs atacantes, top 10 reglas más activas, evolución horaria y geolocalización por país (vía API RIPE NCC).
+  - Las estadísticas se actualizan en segundo plano sin bloquear la interfaz.
+  - Cierre con `[ESC]`, actualización manual con `[E]`.
 
 ---
 
@@ -102,6 +106,7 @@ Ideal para ejecutar en servidores en segundo plano o como servicio `systemd`:
 | `[B]` | **Bloquear** manualmente cualquier IP o subred (ej. `1.2.3.4` o `1.2.3.0/24`) |
 | `[A]` | **Añadir nueva regla/cadena de ataque** en caliente y guardarla en `config.json` |
 | `[D]` | **Eliminar regla/cadena de ataque** definida por el usuario |
+| `[E]` | **Estadísticas**: panel dedicado con tasa de ataque, categorías, top IPs, geolocalización por país y evolución horaria |
 | `[M]` | **Cambiar modo** entre Simulación (Dry-Run) y Cortafuegos Real (Live) |
 | `[P]` | **Pausar / Reanudar** el flujo de eventos en pantalla |
 | `[C]` | **Limpiar** registros expirados de la vista |
