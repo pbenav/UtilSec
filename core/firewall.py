@@ -403,6 +403,7 @@ class FirewallManager:
                     record.status = "BANNED"
                     record.backend = self.active_backend
                     self._exec_ban_system(record)
+                    self.kill_active_connections(ip)
 
                 if self.storage:
                     self.storage.save_ban(record)
@@ -646,6 +647,39 @@ class FirewallManager:
 
         return count
 
+    def kill_active_connections(self, ip: str) -> None:
+        """Forcibly close active TCP sockets (Keep-Alive) for an attacking IP or subnet.
+
+        Terminates both native IPv4/IPv6 and IPv4-mapped IPv6 sockets (::ffff:x.x.x.x),
+        which are standard when web servers like Apache or Nginx listen on dual-stack [::].
+        """
+        if self.dry_run or not shutil.which("ss"):
+            return
+
+        is_root = os.geteuid() == 0
+        prefix = [] if is_root else ["sudo", "-n"]
+        kill_target = ip.split("/")[0] if "/" in ip else ip
+
+        # Never kill sockets belonging to whitelisted IPs
+        if self.is_ip_whitelisted(kill_target):
+            return
+
+        try:
+            # 1. Terminate native destination socket
+            subprocess.run(
+                prefix + ["ss", "-K", "dst", kill_target],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
+            )
+            # 2. Terminate IPv4-mapped IPv6 socket if target is IPv4
+            if ":" not in kill_target:
+                subprocess.run(
+                    prefix + ["ss", "-K", "dst", f"::ffff:{kill_target}"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
+                )
+            logger.info("Executed connection kill (ss -K) for attacker IP %s", kill_target)
+        except Exception as e:
+            logger.debug("Failed to terminate active sockets for %s: %s", kill_target, e)
+
     def _exec_ban_system(self, record: BanRecord) -> None:
         ip = record.ip
         if self.is_ip_whitelisted(ip):
@@ -666,6 +700,8 @@ class FirewallManager:
                 try:
                     exists = subprocess.run(check_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
                     if exists:
+                        # Rule already exists in firewall, but kill lingering or new sockets in burst attack!
+                        self.kill_active_connections(ip)
                         return
                 except Exception:
                     pass
@@ -691,13 +727,8 @@ class FirewallManager:
                 record.status = "ERROR"
 
             # Kill existing active TCP connections (Keep-Alive) from banned IP/subnet
-            if record.status != "ERROR" and shutil.which("ss"):
-                try:
-                    kill_target = ip.split("/")[0] if "/" in ip else ip
-                    kill_cmd = prefix + ["ss", "-K", "dst", kill_target]
-                    subprocess.run(kill_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
-                except Exception as e:
-                    logger.debug("Failed to terminate active sockets for %s: %s", ip, e)
+            if record.status != "ERROR":
+                self.kill_active_connections(ip)
 
     def _exec_unban_system(self, record: BanRecord) -> None:
         ip = record.ip

@@ -130,6 +130,11 @@ def main():
     # 5. Handler for parsed requests
     def on_request(ip: str, method: str, url: str, status: int, raw_line: str, source_log: str = "default"):
         try:
+            # Check if this IP is already banned (e.g. burst attack arriving on existing socket)
+            already_banned = firewall.is_ip_banned(ip)
+            if already_banned:
+                firewall.kill_active_connections(ip)
+
             event, should_ban, ban_reason = detector.analyze_request(
                 ip=ip, method=method, url=url, status_code=status, raw_line=raw_line, source_log=source_log
             )
@@ -141,16 +146,17 @@ def main():
                 elif args.headless:
                     print(f"[!] {event.summary()}")
 
-                if should_ban:
+                if should_ban or already_banned:
                     target = config.get_ban_target(ip)
                     firewall.ban_ip(
                         ip=target,
-                        reason=ban_reason,
+                        reason=ban_reason if should_ban else f"Burst Attack while Banned: {event.matched_rule}",
                         matched_pattern=event.matched_rule,
                         duration=config.default_ban_duration,
                         last_url=url,
                         config=config,
                     )
+                    firewall.kill_active_connections(ip)
         except Exception as e:
             logger.error(f"Error processing request ({ip}, {method}, {url}): {e}")
 

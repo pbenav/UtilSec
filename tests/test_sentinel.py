@@ -615,4 +615,33 @@ class TestSentinelCore(unittest.TestCase):
         # Whitelisted IP is NEVER considered banned!
         self.assertIsNone(fw.is_ip_banned("1.2.3.4"))
 
+    def test_kill_active_connections_protection(self):
+        """kill_active_connections must refuse to kill sockets for whitelisted IPs."""
+        cfg_path = os.path.join(self.tmp_dir.name, "kill_cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write("""{
+                "log_file": "test.log",
+                "firewall_backend": "dummy",
+                "dry_run": false,
+                "whitelist": ["185.204.62.36"]
+            }""")
+        cfg = ConfigManager(cfg_path)
+        fw = FirewallManager(dry_run=True, storage=self.storage, config=cfg)
+        fw.dry_run = False
+
+        import unittest.mock as mock
+        with mock.patch("subprocess.run") as mock_run:
+            # 1. Calling on whitelisted IP must do nothing
+            fw.kill_active_connections("185.204.62.36")
+            mock_run.assert_not_called()
+
+            # 2. Calling on attacker IP must execute ss -K for native and IPv4-mapped IPv6
+            fw.kill_active_connections("185.204.62.50")
+            self.assertEqual(mock_run.call_count, 2)
+            first_cmd = mock_run.call_args_list[0][0][0]
+            second_cmd = mock_run.call_args_list[1][0][0]
+            self.assertIn("185.204.62.50", first_cmd)
+            self.assertIn("::ffff:185.204.62.50", second_cmd)
+
+
 
