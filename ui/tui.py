@@ -831,13 +831,17 @@ class SentinelTUI:
             inp = self._prompt_input(stdscr, "Enter IP or Subnet to BAN (e.g. 1.2.3.4 or 1.2.3.0/24): ")
             if inp:
                 target = self.config.get_ban_target(inp)
-                self.firewall.ban_ip(
+                banned = self.firewall.ban_ip(
                     ip=target,
                     reason="Manual Ban via TUI",
                     matched_pattern="manual",
                     duration=self.config.default_ban_duration,
+                    config=self.config,
                 )
-                self.set_status(f"Manually banned target: {target}")
+                if banned:
+                    self.set_status(f"Manually banned target: {target}")
+                else:
+                    self.set_status(f"⚠️ Target {target} is whitelisted! Ban refused.")
 
         elif key in (ord("a"), ord("A")):
             # Add custom attack rule

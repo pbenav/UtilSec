@@ -37,6 +37,8 @@ class FirewallManager:
         on_ban_change: Optional[Callable[[BanRecord, str], None]] = None,
         ban_subnet: bool = True,
         subnet_cidr: int = 24,
+        config=None,
+        whitelist_networks: Optional[List] = None,
     ):
         self.requested_backend = backend
         self.dry_run = dry_run
@@ -44,6 +46,12 @@ class FirewallManager:
         self.on_ban_change = on_ban_change
         self.ban_subnet = ban_subnet
         self.subnet_cidr = subnet_cidr
+        self.config = config
+        self.whitelist_networks = []
+        if whitelist_networks is not None:
+            self.whitelist_networks = list(whitelist_networks)
+        elif config and hasattr(config, "whitelist_networks"):
+            self.whitelist_networks = list(config.whitelist_networks)
 
         self.lock = threading.Lock()
         self.active_bans: Dict[str, BanRecord] = {}
@@ -58,7 +66,17 @@ class FirewallManager:
             now = time.time()
             with self.lock:
                 for orig_ip, record in loaded.items():
+                    # Whitelist check: if stored ban overlaps current whitelist, mark as WHITELISTED and skip
+                    if self.is_ip_whitelisted(orig_ip):
+                        logger.warning("Stored ban %s is whitelisted! Marking as WHITELISTED in DB.", orig_ip)
+                        self.storage.update_ban_status(orig_ip, "WHITELISTED")
+                        continue
+
                     target = self.to_subnet(orig_ip)
+                    if self.is_ip_whitelisted(target):
+                        logger.warning("Subnet %s for stored ban %s overlaps whitelist! Reverting to single IP.", target, orig_ip)
+                        target = orig_ip
+
                     record.ip = target
                     # If already expired while app was offline, mark as EXPIRED
                     if record.ban_duration > 0 and now >= record.unban_at:
@@ -75,6 +93,8 @@ class FirewallManager:
         if not self.dry_run and self.active_bans:
             with self.lock:
                 for record in self.active_bans.values():
+                    if self.is_ip_whitelisted(record.ip):
+                        continue
                     record.status = "BANNED"
                     record.backend = self.active_backend
                     self._exec_ban_system(record)
@@ -108,6 +128,18 @@ class FirewallManager:
         
         # For each UtilSec rule in firewall, check if it exists in memory/storage
         for ip in firewall_utilsec_ips:
+            # Check if this rule matches or overlaps with whitelist!
+            if self.is_ip_whitelisted(ip):
+                logger.warning("[SYNC] Firewall rule for %s overlaps with whitelist! Removing rule immediately.", ip)
+                temp_rec = BanRecord(
+                    ip=ip, reason="Whitelisted rule removal", matched_pattern="",
+                    attack_count=0, banned_at=now, ban_duration=0, backend=self.active_backend
+                )
+                self._exec_unban_system(temp_rec)
+                if self.storage:
+                    self.storage.update_ban_status(ip, "WHITELISTED")
+                continue
+
             if ip in memory_bans:
                 # Already in memory, skip
                 continue
@@ -133,6 +165,8 @@ class FirewallManager:
             
             # Valid ban - restore to active_bans with original TTL preserved
             subnet_ip = self.to_subnet(ip)
+            if self.is_ip_whitelisted(subnet_ip):
+                subnet_ip = ip
             record.ip = subnet_ip
             record.status = "BANNED"
             record.backend = self.active_backend
@@ -192,6 +226,34 @@ class FirewallManager:
                     f.write("#!/bin/bash\n# UtilSec Sentinel Generated Firewall Script\n\n")
                 os.chmod(filename, 0o755)
 
+    def _get_whitelist_networks(self, config=None) -> List:
+        """Returns the current list of whitelisted ip_network objects."""
+        cfg = config or self.config
+        if cfg and hasattr(cfg, "whitelist_networks"):
+            return cfg.whitelist_networks
+        return self.whitelist_networks
+
+    def is_ip_whitelisted(self, ip_str: str, config=None) -> bool:
+        """Checks if an IP or subnet belongs to or overlaps with any whitelisted network."""
+        ip_str = ip_str.strip()
+        whitelist = self._get_whitelist_networks(config)
+        if not whitelist:
+            return False
+        try:
+            if "/" in ip_str:
+                net = ipaddress.ip_network(ip_str, strict=False)
+                for wnet in whitelist:
+                    if net.overlaps(wnet):
+                        return True
+            else:
+                addr = ipaddress.ip_address(ip_str)
+                for wnet in whitelist:
+                    if addr in wnet:
+                        return True
+        except ValueError:
+            return False
+        return False
+
     def to_subnet(self, ip_str: str) -> str:
         """Converts an IP into its /24 subnet (or /64 for IPv6) if ban_subnet is enabled."""
         ip_str = ip_str.strip()
@@ -206,8 +268,14 @@ class FirewallManager:
             return ip_str
 
     def is_ip_banned(self, ip_str: str) -> Optional[BanRecord]:
-        """Checks if an IP matches an active ban or belongs to a banned subnet."""
+        """Checks if an IP matches an active ban or belongs to a banned subnet.
+        
+        Defense-in-depth: Any IP in the whitelist is NEVER considered banned.
+        """
         ip_str = ip_str.strip()
+        if self.is_ip_whitelisted(ip_str):
+            return None
+
         with self.lock:
             if ip_str in self.active_bans:
                 return self.active_bans[ip_str]
@@ -271,37 +339,49 @@ class FirewallManager:
         If ban_subnet is enabled and the target subnet contains whitelisted IPs,
         the subnet is automatically split into safe sub-ranges that exclude them.
         """
-        # Resolve target subnet
+        cfg = config or self.config
+        whitelist = self._get_whitelist_networks(cfg)
+
+        # 1. Whitelist protection: refuse immediately if IP or range is whitelisted
+        if self.is_ip_whitelisted(ip, config=cfg):
+            logger.warning("Refusing to ban %s: IP or range is in whitelist!", ip)
+            return False
+
+        # 2. Resolve target subnet
         target = self.to_subnet(ip)
 
-        # Whitelist-aware splitting: if the /24 overlaps with whitelisted networks,
+        # 3. Whitelist-aware splitting: if the /24 overlaps with whitelisted networks,
         # compute safe sub-ranges that exclude those whitelisted IPs
-        if config and self.ban_subnet and "/" in target:
+        if self.ban_subnet and "/" in target and whitelist:
             try:
                 net = ipaddress.ip_network(target, strict=False)
-                safe_subnets = self._get_safe_subnets(net, config.whitelist_networks)
-                if safe_subnets:
-                    # Ban each safe subnet individually
-                    for subnet in safe_subnets:
-                        self._do_ban(
-                            ip=str(subnet),
-                            reason=reason,
-                            matched_pattern=matched_pattern,
-                            duration=duration,
-                            last_url=last_url,
-                            count=count,
+                if any(net.overlaps(wnet) for wnet in whitelist):
+                    safe_subnets = self._get_safe_subnets(net, whitelist)
+                    if safe_subnets:
+                        # Ban each safe subnet individually
+                        for subnet in safe_subnets:
+                            self._do_ban(
+                                ip=str(subnet),
+                                reason=reason,
+                                matched_pattern=matched_pattern,
+                                duration=duration,
+                                last_url=last_url,
+                                count=count,
+                            )
+                        return True
+                    else:
+                        # Entire subnet is whitelisted — don't ban anything
+                        logger.warning(
+                            "Refusing to ban %s: entire range overlaps with whitelisted networks",
+                            target,
                         )
-                    # Report the first safe subnet as the primary result
-                    return True
-                else:
-                    # Entire subnet is whitelisted — don't ban anything
-                    logger.warning(
-                        "Refusing to ban %s: entire range overlaps with whitelisted networks",
-                        target,
-                    )
-                    return False
+                        return False
             except (ValueError, TypeError):
                 pass
+
+        if self.is_ip_whitelisted(target, config=cfg):
+            logger.warning("Refusing to ban target %s: overlaps with whitelisted networks", target)
+            return False
 
         # No whitelist conflict or single IP — ban directly
         return self._do_ban(target, reason, matched_pattern, duration, last_url, count)
@@ -489,7 +569,7 @@ class FirewallManager:
             logger.debug("Error detecting fail2ban jail: %s", e)
             return ""
 
-    def _ensure_whitelist_rules(self, whitelist_nets: List) -> int:
+    def _ensure_whitelist_rules(self, whitelist_nets: Optional[List] = None) -> int:
         """Ensure whitelist IPs have ACCEPT rules at the TOP of the INPUT chain.
         
         This is CRITICAL: whitelist rules must always exist and be before any DROP rules.
@@ -498,75 +578,90 @@ class FirewallManager:
         if self.dry_run:
             return 0
 
+        if whitelist_nets is None:
+            whitelist_nets = self._get_whitelist_networks()
+
+        if not whitelist_nets:
+            return 0
+
         count = 0
         is_root = os.geteuid() == 0
         prefix = [] if is_root else ["sudo", "-n"]
 
-        try:
-            # Get current rules with line numbers
-            result = subprocess.run(
-                prefix + ["iptables", "-L", "INPUT", "-n", "--line-numbers"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
-            )
-            if result.returncode != 0:
-                logger.error("Failed to list INPUT chain rules")
-                return 0
+        if self.active_backend == "iptables":
+            try:
+                # Check current rules with iptables -S INPUT
+                res = subprocess.run(
+                    prefix + ["iptables", "-S", "INPUT"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+                )
+                output = res.stdout.decode("utf-8", errors="replace") if res.returncode == 0 else ""
+                existing_rules = set()
+                for line in output.splitlines():
+                    if "-j ACCEPT" in line:
+                        parts = line.split()
+                        for i, part in enumerate(parts):
+                            if part == "-s" and i + 1 < len(parts):
+                                existing_rules.add(parts[i + 1])
 
-            output = result.stdout.decode("utf-8", errors="replace")
-            existing_rules = set()
-            in_input_chain = False
-            for line in output.splitlines():
-                if line.startswith("chain input"):
-                    in_input_chain = True
-                    continue
-                if line.startswith("chain ") and in_input_chain:
-                    break
-                if in_input_chain and "ACCEPT" in line:
-                    # Extract the IP/network from ACCEPT rules
-                    parts = line.split()
-                    for i, part in enumerate(parts):
-                        if part == "SRC" and i + 1 < len(parts):
-                            existing_rules.add(parts[i + 1])
-
-            # Add whitelist rules that don't exist
-            for wnet in whitelist_nets:
-                wnet_str = str(wnet)
-                if wnet_str in existing_rules:
-                    continue
-
-                # Check if a broader whitelist rule already covers this network
-                covered = False
-                for existing in existing_rules:
-                    try:
-                        if wnet.overlaps(ipaddress.ip_network(existing, strict=False)):
-                            covered = True
-                            break
-                    except ValueError:
+                # Insert from last to first at position 1 so they end up in order 1..N
+                for wnet in reversed(whitelist_nets):
+                    wnet_str = str(wnet)
+                    cidr_str = f"{wnet_str}/32" if "/" not in wnet_str and getattr(wnet, "version", 4) == 4 else wnet_str
+                    if wnet_str in existing_rules or cidr_str in existing_rules:
+                        count += 1
                         continue
 
-                if covered:
-                    continue
+                    # Insert ACCEPT rule at position 1 (top of INPUT chain)
+                    cmd = prefix + [
+                        "iptables", "-w", "5", "-I", "INPUT", "1",
+                        "-s", wnet_str, "-j", "ACCEPT",
+                        "-m", "comment", "--comment", "UtilSec-Whitelist"
+                    ]
+                    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+                    count += 1
+                    logger.info("Added whitelist ACCEPT rule for %s at top of INPUT chain", wnet_str)
 
-                # Insert ACCEPT rule at position 1 (top of INPUT chain)
-                cmd = prefix + ["iptables", "-w", "5", "-I", "INPUT", "1", "-s", wnet_str, "-j", "ACCEPT"]
-                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
-                count += 1
-                logger.info("Added whitelist ACCEPT rule for %s at top of INPUT chain", wnet_str)
+            except Exception as e:
+                logger.error("Error ensuring whitelist rules: %s", e)
 
-        except Exception as e:
-            logger.error("Error ensuring whitelist rules: %s", e)
+        elif self.active_backend == "ufw":
+            try:
+                res = subprocess.run(
+                    prefix + ["ufw", "status"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+                )
+                output = res.stdout.decode("utf-8", errors="replace") if res.returncode == 0 else ""
+                for wnet in reversed(whitelist_nets):
+                    wnet_str = str(wnet)
+                    if wnet_str not in output:
+                        cmd = prefix + ["ufw", "insert", "1", "allow", "from", wnet_str, "comment", "UtilSec-Whitelist"]
+                        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+                        count += 1
+                        logger.info("Added ufw whitelist ALLOW rule for %s", wnet_str)
+                    else:
+                        count += 1
+            except Exception as e:
+                logger.error("Error ensuring ufw whitelist rules: %s", e)
 
         return count
 
     def _exec_ban_system(self, record: BanRecord) -> None:
         ip = record.ip
+        if self.is_ip_whitelisted(ip):
+            logger.warning("Refusing _exec_ban_system for %s: IP or range is whitelisted!", ip)
+            record.status = "WHITELISTED"
+            return
+
         cmd = []
         is_root = os.geteuid() == 0
         prefix = [] if is_root else ["sudo", "-n"]
+        whitelist_offset = len(self._get_whitelist_networks())
+        insert_pos = str(whitelist_offset + 1)
 
         if self.active_backend == "iptables":
             check_cmd = prefix + ["iptables", "-w", "5", "-C", "INPUT", "-s", ip, "-j", "DROP", "-m", "comment", "--comment", "UtilSec"]
-            cmd = prefix + ["iptables", "-w", "5", "-I", "INPUT", "-s", ip, "-j", "DROP", "-m", "comment", "--comment", "UtilSec"]
+            cmd = prefix + ["iptables", "-w", "5", "-I", "INPUT", insert_pos, "-s", ip, "-j", "DROP", "-m", "comment", "--comment", "UtilSec"]
             if not self.dry_run:
                 try:
                     exists = subprocess.run(check_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
@@ -575,12 +670,12 @@ class FirewallManager:
                 except Exception:
                     pass
         elif self.active_backend == "ufw":
-            cmd = prefix + ["ufw", "insert", "1", "deny", "from", ip, "to", "any", "comment", "UtilSec"]
+            cmd = prefix + ["ufw", "insert", insert_pos, "deny", "from", ip, "to", "any", "comment", "UtilSec"]
         elif self.active_backend == "nft":
             cmd = prefix + ["nft", "add", "element", "inet", "filter", "utilsec_bans", f"{{ {ip} }}"]
 
         # If dry-run or failed execution, log to script
-        cmd_str = " ".join(cmd) if cmd else f"iptables -I INPUT -s {ip} -j DROP # UtilSec ({record.reason})"
+        cmd_str = " ".join(cmd) if cmd else f"iptables -I INPUT {insert_pos} -s {ip} -j DROP # UtilSec ({record.reason})"
         with open("banned_ips.sh", "a", encoding="utf-8") as f:
             f.write(f"# [{datetime.now().isoformat()}] {record.reason} (URL: {record.last_url})\n{cmd_str}\n")
 
@@ -594,6 +689,15 @@ class FirewallManager:
             except Exception as e:
                 logger.error("Failed to execute ban on %s: %s", ip, e)
                 record.status = "ERROR"
+
+            # Kill existing active TCP connections (Keep-Alive) from banned IP/subnet
+            if record.status != "ERROR" and shutil.which("ss"):
+                try:
+                    kill_target = ip.split("/")[0] if "/" in ip else ip
+                    kill_cmd = prefix + ["ss", "-K", "dst", kill_target]
+                    subprocess.run(kill_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+                except Exception as e:
+                    logger.debug("Failed to terminate active sockets for %s: %s", ip, e)
 
     def _exec_unban_system(self, record: BanRecord) -> None:
         ip = record.ip
@@ -614,7 +718,11 @@ class FirewallManager:
 
         if not self.dry_run and cmd:
             try:
-                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if res.returncode != 0 and self.active_backend == "iptables":
+                    # Fallback without comment in case rule was inserted without comment
+                    fallback_cmd = prefix + ["iptables", "-w", "5", "-D", "INPUT", "-s", ip, "-j", "DROP"]
+                    subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             except Exception as e:
                 logger.error("Failed to execute unban on %s: %s", ip, e)
 
@@ -917,8 +1025,11 @@ class FirewallManager:
 
             self.dry_run = False
             self.active_backend = live_backend
+            self._ensure_whitelist_rules()
             with self.lock:
                 for record in self.active_bans.values():
+                    if self.is_ip_whitelisted(record.ip):
+                        continue
                     if record.status == "SIMULATED":
                         record.status = "BANNED"
                         record.backend = self.active_backend

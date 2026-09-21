@@ -116,6 +116,7 @@ def main():
         dry_run=dry_run,
         storage=storage,
         on_ban_change=on_ban_change,
+        config=config,
     )
 
     # CRITICAL: Ensure whitelist IPs have ACCEPT rules at the TOP of INPUT chain
@@ -148,6 +149,7 @@ def main():
                         matched_pattern=event.matched_rule,
                         duration=config.default_ban_duration,
                         last_url=url,
+                        config=config,
                     )
         except Exception as e:
             logger.error(f"Error processing request ({ip}, {method}, {url}): {e}")

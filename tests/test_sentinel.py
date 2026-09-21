@@ -491,3 +491,128 @@ class TestSentinelCore(unittest.TestCase):
         # Attacker IP should be banned
         self.assertIsNotNone(fw.is_ip_banned("192.168.1.50"))
 
+    def test_whitelist_subnet_isolation_user_scenario(self):
+        """Reproduce user bug: 185.204.62.36 is whitelisted, 185.204.62.50 attacks.
+        185.204.62.36 must NEVER be blocked even if ban_subnet is True and ban_ip
+        is called without passing config explicitly.
+        """
+        cfg_path = os.path.join(self.tmp_dir.name, "user_whitelist_cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write("""{
+                "log_file": "test.log",
+                "firewall_backend": "dummy",
+                "dry_run": true,
+                "ban_subnet": true,
+                "whitelist": ["185.204.62.36"]
+            }""")
+        cfg = ConfigManager(cfg_path)
+        fw = FirewallManager(dry_run=True, storage=self.storage, config=cfg)
+
+        # 1. get_ban_target must return single IP when subnet overlaps whitelist
+        self.assertEqual(cfg.get_ban_target("185.204.62.50"), "185.204.62.50")
+
+        # 2. Ban attacker without passing config explicitly
+        banned = fw.ban_ip(
+            ip="185.204.62.50",
+            reason="Malicious scanner",
+            matched_pattern="/wp-admin",
+            duration=3600,
+        )
+        self.assertTrue(banned)
+
+        # 3. Whitelisted IP must NOT be banned
+        self.assertIsNone(fw.is_ip_banned("185.204.62.36"))
+        self.assertNotIn("185.204.62.0/24", fw.active_bans)
+        self.assertNotIn("185.204.62.36", fw.active_bans)
+
+        # 4. Attacker must be banned
+        self.assertIsNotNone(fw.is_ip_banned("185.204.62.50"))
+
+    def test_whitelist_direct_ban_refused(self):
+        """Calling ban_ip directly on a whitelisted IP or range must return False and refuse ban."""
+        cfg_path = os.path.join(self.tmp_dir.name, "whitelist_refuse_cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write("""{
+                "log_file": "test.log",
+                "firewall_backend": "dummy",
+                "dry_run": true,
+                "whitelist": ["10.20.30.40"]
+            }""")
+        cfg = ConfigManager(cfg_path)
+        fw = FirewallManager(dry_run=True, storage=self.storage, config=cfg)
+
+        result = fw.ban_ip(
+            ip="10.20.30.40",
+            reason="Manual mistake",
+            matched_pattern="manual",
+            duration=3600,
+        )
+        self.assertFalse(result)
+        self.assertIsNone(fw.is_ip_banned("10.20.30.40"))
+        self.assertNotIn("10.20.30.40", fw.active_bans)
+
+    def test_storage_startup_sanitization(self):
+        """Stored bans that conflict with current whitelist must be purged on startup."""
+        from core.models import BanRecord
+        import time
+
+        db_path = os.path.join(self.tmp_dir.name, "sanitization_test.db")
+        storage = StorageManager(db_path)
+
+        # Store a ban that contains 185.204.62.36
+        bad_rec = BanRecord(
+            ip="185.204.62.0/24",
+            reason="Old wide ban",
+            matched_pattern="/test",
+            attack_count=5,
+            banned_at=time.time(),
+            ban_duration=3600,
+            status="BANNED",
+            backend="dummy",
+        )
+        storage.save_ban(bad_rec)
+
+        cfg_path = os.path.join(self.tmp_dir.name, "sanitization_cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write("""{
+                "log_file": "test.log",
+                "firewall_backend": "dummy",
+                "dry_run": true,
+                "whitelist": ["185.204.62.36"]
+            }""")
+        cfg = ConfigManager(cfg_path)
+
+        # Initializing FirewallManager with this storage & config
+        fw = FirewallManager(dry_run=True, storage=storage, config=cfg)
+
+        # The subnet /24 overlapping whitelist should NOT be in active_bans
+        self.assertNotIn("185.204.62.0/24", fw.active_bans)
+        self.assertIsNone(fw.is_ip_banned("185.204.62.36"))
+
+    def test_is_ip_banned_defense_in_depth(self):
+        """Even if an overlapping ban exists in memory, is_ip_banned always returns None for whitelisted IPs."""
+        cfg_path = os.path.join(self.tmp_dir.name, "did_cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write("""{
+                "log_file": "test.log",
+                "firewall_backend": "dummy",
+                "dry_run": true,
+                "whitelist": ["1.2.3.4"]
+            }""")
+        cfg = ConfigManager(cfg_path)
+        fw = FirewallManager(dry_run=True, storage=self.storage, config=cfg)
+
+        # Manually inject an aggressive rule in active_bans
+        from core.models import BanRecord
+        import time
+        fw.active_bans["0.0.0.0/0"] = BanRecord(
+            ip="0.0.0.0/0", reason="Extreme", matched_pattern="*", attack_count=1,
+            banned_at=time.time(), ban_duration=3600, status="SIMULATED", backend="dummy"
+        )
+
+        # Regular IP is considered banned by 0.0.0.0/0
+        self.assertIsNotNone(fw.is_ip_banned("8.8.8.8"))
+        # Whitelisted IP is NEVER considered banned!
+        self.assertIsNone(fw.is_ip_banned("1.2.3.4"))
+
+
