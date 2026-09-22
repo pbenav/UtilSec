@@ -78,7 +78,11 @@ fi
 
 # 4. Enforce SecRuleEngine On and performance tuning
 log_info "Configurando SecRuleEngine en modo bloqueo ('On')..."
-sed -i 's/^[[:space:]]*SecRuleEngine[[:space:]].*/SecRuleEngine On/' "$MODSEC_CONF"
+if grep -qE "^[[:space:]]*#?[[:space:]]*SecRuleEngine" "$MODSEC_CONF"; then
+    sed -i -E 's/^[[:space:]]*#?[[:space:]]*SecRuleEngine[[:space:]].*/SecRuleEngine On/' "$MODSEC_CONF"
+else
+    echo "SecRuleEngine On" >> "$MODSEC_CONF"
+fi
 
 # Performance optimization: disable SecResponseBodyAccess to avoid high CPU overhead
 sed -i 's/^[[:space:]]*SecResponseBodyAccess[[:space:]].*/SecResponseBodyAccess Off/' "$MODSEC_CONF" || true
@@ -165,6 +169,12 @@ cat << 'EOF' > "$SEC2_AVAILABLE"
         # Default Debian dir for modsecurity's persistent data
         SecDataDir /var/cache/modsecurity
 
+        # Ensure SecRuleEngine is active globally
+        SecRuleEngine On
+        SecRequestBodyAccess On
+        SecResponseBodyAccess Off
+        SecStatusEngine Off
+
         # 1. Base ModSecurity engine configuration
         IncludeOptional /etc/modsecurity/modsecurity.conf
 
@@ -180,10 +190,9 @@ cat << 'EOF' > "$SEC2_AVAILABLE"
 </IfModule>
 EOF
 
-# Sync mods-enabled if it is a regular file rather than a symlink
-if [[ -f "$SEC2_ENABLED" && ! -L "$SEC2_ENABLED" ]]; then
-    cp -f "$SEC2_AVAILABLE" "$SEC2_ENABLED"
-fi
+# Ensure mods-enabled points directly to mods-available
+mkdir -p /etc/apache2/mods-enabled
+ln -sf "$SEC2_AVAILABLE" "$SEC2_ENABLED"
 
 log_success "security2.conf configurado con inclusión explícita (sin duplicados)."
 
@@ -234,10 +243,27 @@ EOF
 chmod 644 "$UTILSEC_RULES_FILE"
 log_success "Reglas UtilSec Phase 1 instaladas correctamente."
 
-# 7. Enable Apache modules
-log_info "Habilitando módulo security2 en Apache..."
-a2enmod -q security2 || true
-a2enmod -q unique_id || true
+# 7. Enable Apache modules in correct dependency order
+log_info "Habilitando módulos necesarios en Apache (unique_id y security2)..."
+a2enmod unique_id || true
+a2enmod security2 || true
+
+# Force symlinks in mods-enabled to guarantee they are loaded
+mkdir -p /etc/apache2/mods-enabled
+for mod in unique_id security2; do
+    if [[ -f "/etc/apache2/mods-available/${mod}.load" ]]; then
+        ln -sf "/etc/apache2/mods-available/${mod}.load" "/etc/apache2/mods-enabled/${mod}.load"
+    fi
+    if [[ -f "/etc/apache2/mods-available/${mod}.conf" ]]; then
+        ln -sf "/etc/apache2/mods-available/${mod}.conf" "/etc/apache2/mods-enabled/${mod}.conf"
+    fi
+done
+
+# Remove any SecRuleEngine Off overrides from sites-enabled
+if grep -rnE "SecRuleEngine[[:space:]]+Off" /etc/apache2/sites-enabled/ >/dev/null 2>&1; then
+    log_warn "Detectado 'SecRuleEngine Off' en sitios habilitados. Eliminando override..."
+    sed -i -E 's/^[[:space:]]*SecRuleEngine[[:space:]]+Off/SecRuleEngine On/' /etc/apache2/sites-enabled/*.conf 2>/dev/null || true
+fi
 
 # 8. Clean up any redundant conf files in conf-enabled that might load rules a second time
 if compgen -G "/etc/apache2/conf-enabled/*modsec*.conf" > /dev/null 2>&1 || compgen -G "/etc/apache2/conf-enabled/*crs*.conf" > /dev/null 2>&1; then
@@ -271,9 +297,18 @@ fi
 # 10. Restart Apache
 log_info "Reiniciando servicio Apache..."
 systemctl restart apache2
-log_success "Apache reiniciado con ModSecurity activo."
+log_success "Apache reiniciado."
 
-# 10. Automated Self-Test Verification
+# Verify module loaded in running Apache
+log_info "Comprobando que mod_security2 esté activo en Apache..."
+if apache2ctl -M 2>/dev/null | grep -q "security2_module"; then
+    log_success "Módulo security2_module cargado y activo en Apache."
+else
+    log_warn "security2_module no figura en la lista de módulos cargados (apache2ctl -M)."
+    apache2ctl -M 2>/dev/null | grep -E "(security|unique)" || true
+fi
+
+# 11. Automated Self-Test Verification
 echo ""
 echo -e "${C_CYAN}----------------------------------------------------------------------"
 echo "               VERIFICACIÓN AUTOMATIZADA EN VIVO"
@@ -302,7 +337,9 @@ if [[ "$ALL_OK" == "true" ]]; then
     echo -e "${C_GREEN}${C_BOLD}✔ ModSecurity está 100% operativo, en modo bloqueo activo y blindado con UtilSec Shield.${C_RESET}"
     echo -e "Las peticiones maliciosas ahora serán abortadas en milisegundos con HTTP 403 antes de tocar tus webs."
 else
-    echo -e "${C_YELLOW}${C_BOLD}⚠ ModSecurity se reinició. Si alguna prueba devolvió un código diferente a 403, revisa /var/log/apache2/error.log.${C_RESET}"
+    echo -e "${C_YELLOW}${C_BOLD}⚠ ModSecurity se reinició, pero las pruebas devolvieron un código diferente a 403.${C_RESET}"
+    echo -e "${C_CYAN}Últimas líneas relevantes en /var/log/apache2/error.log:${C_RESET}"
+    tail -n 15 /var/log/apache2/error.log 2>/dev/null || true
 fi
 echo ""
 
