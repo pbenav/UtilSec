@@ -94,6 +94,12 @@ Ideal para ejecutar en servidores en segundo plano o como servicio `systemd`:
 ./sentinel.py --headless
 ```
 
+### 3. Blindaje Web con ModSecurity (Recomendado)
+UtilSec incluye un script automatizado para instalar, configurar y activar ModSecurity junto a OWASP CRS y reglas de intercepción en Fase 1 (cortando en microsegundos escaneos a `.env`, `.git`, `.aws`, `.docker`, etc. con `403 Forbidden` antes de tocar los workers de Apache):
+```bash
+sudo ./scripts/setup_modsecurity.sh
+```
+
 ---
 
 ## Controles en la Interfaz TUI
