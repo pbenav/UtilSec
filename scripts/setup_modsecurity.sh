@@ -84,76 +84,71 @@ sed -i 's/^[[:space:]]*SecRuleEngine[[:space:]].*/SecRuleEngine On/' "$MODSEC_CO
 sed -i 's/^[[:space:]]*SecResponseBodyAccess[[:space:]].*/SecResponseBodyAccess Off/' "$MODSEC_CONF" || true
 sed -i 's/^[[:space:]]*SecStatusEngine[[:space:]].*/SecStatusEngine Off/' "$MODSEC_CONF" || true
 
+# Clean any legacy Include directives inside modsecurity.conf that could cause double-loading
+sed -i '/^[[:space:]]*Include[[:space:]]/d' "$MODSEC_CONF" || true
+sed -i '/^[[:space:]]*IncludeOptional[[:space:]]/d' "$MODSEC_CONF" || true
+
 log_success "SecRuleEngine configurado en modo On (bloqueo activo)."
 
-# 5. Configure security2.conf to properly load CRS rules without duplication
-SEC2_CONF="/etc/apache2/mods-available/security2.conf"
-if [[ -f "$SEC2_CONF" ]]; then
-    log_info "Revisando configuración de inclusión de reglas en $SEC2_CONF..."
-    
-    # Ensure cache directory exists
-    mkdir -p /var/cache/modsecurity
-    chown -R www-data:www-data /var/cache/modsecurity 2>/dev/null || true
+# 5. Resolve and isolate OWASP CRS Setup file
+mkdir -p "$MODSEC_DIR/crs"
+CRS_SETUP="$MODSEC_DIR/crs/crs-setup.conf"
 
-    # Prevent duplicate crs-setup.conf in /etc/modsecurity/ root if it was copied there
+if [[ ! -f "$CRS_SETUP" ]]; then
     if [[ -f "$MODSEC_DIR/crs-setup.conf" ]]; then
-        mkdir -p "$MODSEC_DIR/crs"
-        mv -f "$MODSEC_DIR/crs-setup.conf" "$MODSEC_DIR/crs/crs-setup.conf"
+        log_info "Moviendo $MODSEC_DIR/crs-setup.conf a $CRS_SETUP..."
+        mv -f "$MODSEC_DIR/crs-setup.conf" "$CRS_SETUP"
+    elif [[ -f "/usr/share/modsecurity-crs/crs-setup.conf" ]]; then
+        log_info "Copiando /usr/share/modsecurity-crs/crs-setup.conf a $CRS_SETUP..."
+        cp -f "/usr/share/modsecurity-crs/crs-setup.conf" "$CRS_SETUP"
+    elif [[ -f "$MODSEC_DIR/crs/crs-setup.conf.example" ]]; then
+        cp -f "$MODSEC_DIR/crs/crs-setup.conf.example" "$CRS_SETUP"
+    elif [[ -f "/usr/share/modsecurity-crs/crs-setup.conf.example" ]]; then
+        cp -f "/usr/share/modsecurity-crs/crs-setup.conf.example" "$CRS_SETUP"
     fi
-
-    # Ensure /etc/modsecurity/crs/crs-setup.conf exists
-    if [[ ! -f "$MODSEC_DIR/crs/crs-setup.conf" ]]; then
-        mkdir -p "$MODSEC_DIR/crs"
-        if [[ -f "$MODSEC_DIR/crs/crs-setup.conf.example" ]]; then
-            cp "$MODSEC_DIR/crs/crs-setup.conf.example" "$MODSEC_DIR/crs/crs-setup.conf"
-        elif [[ -f "/usr/share/modsecurity-crs/crs-setup.conf.example" ]]; then
-            cp "/usr/share/modsecurity-crs/crs-setup.conf.example" "$MODSEC_DIR/crs/crs-setup.conf"
-        fi
-    fi
-
-    # Check if Debian/Ubuntu's standard owasp-crs.load is available
-    if compgen -G "/usr/share/modsecurity-crs/*.load" > /dev/null; then
-        # owasp-crs.load already loads /etc/modsecurity/crs/crs-setup.conf and rules/*.conf
-        cat << 'EOF' > "$SEC2_CONF"
-<IfModule security2_module>
-        # Default Debian dir for modsecurity's persistent data
-        SecDataDir /var/cache/modsecurity
-
-        # Include all configuration files in /etc/modsecurity (modsecurity.conf, utilsec_shield.conf)
-        IncludeOptional /etc/modsecurity/*.conf
-
-        # Include OWASP ModSecurity CRS rules (owasp-crs.load loads crs-setup.conf and all rules cleanly)
-        IncludeOptional /usr/share/modsecurity-crs/*.load
-</IfModule>
-EOF
-    elif [[ -d "/usr/share/modsecurity-crs/rules" ]]; then
-        # Fallback for systems without .load file
-        cat << 'EOF' > "$SEC2_CONF"
-<IfModule security2_module>
-        # Default Debian dir for modsecurity's persistent data
-        SecDataDir /var/cache/modsecurity
-
-        # Include all configuration files in /etc/modsecurity
-        IncludeOptional /etc/modsecurity/*.conf
-
-        # Include OWASP ModSecurity CRS setup and rules
-        IncludeOptional /etc/modsecurity/crs/crs-setup.conf
-        IncludeOptional /usr/share/modsecurity-crs/rules/*.conf
-</IfModule>
-EOF
-    else
-        cat << 'EOF' > "$SEC2_CONF"
-<IfModule security2_module>
-        # Default Debian dir for modsecurity's persistent data
-        SecDataDir /var/cache/modsecurity
-
-        # Include all configuration files in /etc/modsecurity
-        IncludeOptional /etc/modsecurity/*.conf
-</IfModule>
-EOF
-    fi
-    log_success "$SEC2_CONF configurado limpiamente sin duplicados de reglas."
 fi
+
+# Clean any stray crs-setup.conf directly under /etc/modsecurity to prevent wildcard double-loading
+if [[ -f "$MODSEC_DIR/crs-setup.conf" ]]; then
+    rm -f "$MODSEC_DIR/crs-setup.conf"
+fi
+
+# Ensure cache directory exists and has correct permissions
+mkdir -p /var/cache/modsecurity
+chown -R www-data:www-data /var/cache/modsecurity 2>/dev/null || true
+
+# Configure security2.conf with explicit, non-overlapping includes
+SEC2_AVAILABLE="/etc/apache2/mods-available/security2.conf"
+SEC2_ENABLED="/etc/apache2/mods-enabled/security2.conf"
+
+log_info "Configurando inclusión limpia y determinista en security2.conf..."
+
+cat << 'EOF' > "$SEC2_AVAILABLE"
+<IfModule security2_module>
+        # Default Debian dir for modsecurity's persistent data
+        SecDataDir /var/cache/modsecurity
+
+        # 1. Base ModSecurity engine configuration
+        IncludeOptional /etc/modsecurity/modsecurity.conf
+
+        # 2. UtilSec Instant Phase-1 Shield Rules
+        IncludeOptional /etc/modsecurity/utilsec_shield.conf
+
+        # 3. OWASP CRS Setup configuration (loaded exactly once)
+        IncludeOptional /etc/modsecurity/crs/crs-setup.conf
+
+        # 4. OWASP CRS Detection Rules
+        IncludeOptional /usr/share/modsecurity-crs/rules/*.conf
+        IncludeOptional /etc/modsecurity/crs/rules/*.conf
+</IfModule>
+EOF
+
+# Sync mods-enabled if it is a regular file rather than a symlink
+if [[ -f "$SEC2_ENABLED" && ! -L "$SEC2_ENABLED" ]]; then
+    cp -f "$SEC2_AVAILABLE" "$SEC2_ENABLED"
+fi
+
+log_success "security2.conf configurado con inclusión explícita (sin duplicados)."
 
 # 6. Install UtilSec Phase-1 Instant Shield Rules
 UTILSEC_RULES_FILE="$MODSEC_DIR/utilsec_shield.conf"
@@ -207,17 +202,45 @@ log_info "Habilitando módulo security2 en Apache..."
 a2enmod -q security2 || true
 a2enmod -q unique_id || true
 
-# 8. Test Apache configuration
+# 8. Clean up any redundant conf files in conf-enabled that might load rules a second time
+if compgen -G "/etc/apache2/conf-enabled/*modsec*.conf" > /dev/null 2>&1 || compgen -G "/etc/apache2/conf-enabled/*crs*.conf" > /dev/null 2>&1; then
+    for f in /etc/apache2/conf-enabled/*modsec*.conf /etc/apache2/conf-enabled/*crs*.conf; do
+        if [[ -f "$f" ]]; then
+            log_warn "Deshabilitando configuración redundante en conf-enabled: $(basename "$f")..."
+            rm -f "$f" || true
+        fi
+    done
+fi
+
+# 9. Test Apache configuration with automated diagnostics
 log_info "Verificando sintaxis de configuración de Apache..."
 if apache2ctl configtest >/dev/null 2>&1; then
     log_success "Sintaxis de Apache: OK."
 else
-    log_error "Error en la sintaxis de Apache:"
-    apache2ctl configtest
-    exit 1
+    log_warn "Fallo en verificación inicial de sintaxis. Diagnosticando..."
+    TEST_OUTPUT=$(apache2ctl configtest 2>&1 || true)
+    echo "$TEST_OUTPUT"
+
+    # If duplicate ID error appears, resolve collision
+    if echo "$TEST_OUTPUT" | grep -q "Found another rule with the same id"; then
+        log_info "Detectado conflicto de ID duplicado. Resolviendo colisión de crs-setup.conf..."
+        if [[ -f "/usr/share/modsecurity-crs/crs-setup.conf" && -f "$CRS_SETUP" ]]; then
+            log_info "Renombrando /usr/share/modsecurity-crs/crs-setup.conf para evitar duplicidad..."
+            mv -f "/usr/share/modsecurity-crs/crs-setup.conf" "/usr/share/modsecurity-crs/crs-setup.conf.disabled"
+        fi
+    fi
+
+    # Re-test syntax
+    if apache2ctl configtest >/dev/null 2>&1; then
+        log_success "Sintaxis de Apache corregida con éxito: OK."
+    else
+        log_error "Error persistente en la sintaxis de Apache:"
+        apache2ctl configtest
+        exit 1
+    fi
 fi
 
-# 9. Restart Apache
+# 10. Restart Apache
 log_info "Reiniciando servicio Apache..."
 systemctl restart apache2
 log_success "Apache reiniciado con ModSecurity activo."
