@@ -40,8 +40,8 @@ fi
 
 log_info "Actualizando repositorios e instalando paquetes necesarios..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq libapache2-mod-security2 modsecurity-crs curl
+apt-get update -qq || true
+apt-get install -y -qq libapache2-mod-security2 modsecurity-crs curl || true
 
 # 3. Base ModSecurity configuration
 MODSEC_DIR="/etc/modsecurity"
@@ -86,7 +86,7 @@ sed -i 's/^[[:space:]]*SecStatusEngine[[:space:]].*/SecStatusEngine Off/' "$MODS
 
 log_success "SecRuleEngine configurado en modo On (bloqueo activo)."
 
-# 5. Configure security2.conf to properly load CRS rules
+# 5. Configure security2.conf to properly load CRS rules without duplication
 SEC2_CONF="/etc/apache2/mods-available/security2.conf"
 if [[ -f "$SEC2_CONF" ]]; then
     log_info "Revisando configuración de inclusión de reglas en $SEC2_CONF..."
@@ -95,8 +95,40 @@ if [[ -f "$SEC2_CONF" ]]; then
     mkdir -p /var/cache/modsecurity
     chown -R www-data:www-data /var/cache/modsecurity 2>/dev/null || true
 
-    # Check if CRS rules are referenced; configure cleanly
-    cat << 'EOF' > "$SEC2_CONF"
+    # Prevent duplicate crs-setup.conf in /etc/modsecurity/ root if it was copied there
+    if [[ -f "$MODSEC_DIR/crs-setup.conf" ]]; then
+        mkdir -p "$MODSEC_DIR/crs"
+        mv -f "$MODSEC_DIR/crs-setup.conf" "$MODSEC_DIR/crs/crs-setup.conf"
+    fi
+
+    # Ensure /etc/modsecurity/crs/crs-setup.conf exists
+    if [[ ! -f "$MODSEC_DIR/crs/crs-setup.conf" ]]; then
+        mkdir -p "$MODSEC_DIR/crs"
+        if [[ -f "$MODSEC_DIR/crs/crs-setup.conf.example" ]]; then
+            cp "$MODSEC_DIR/crs/crs-setup.conf.example" "$MODSEC_DIR/crs/crs-setup.conf"
+        elif [[ -f "/usr/share/modsecurity-crs/crs-setup.conf.example" ]]; then
+            cp "/usr/share/modsecurity-crs/crs-setup.conf.example" "$MODSEC_DIR/crs/crs-setup.conf"
+        fi
+    fi
+
+    # Check if Debian/Ubuntu's standard owasp-crs.load is available
+    if compgen -G "/usr/share/modsecurity-crs/*.load" > /dev/null; then
+        # owasp-crs.load already loads /etc/modsecurity/crs/crs-setup.conf and rules/*.conf
+        cat << 'EOF' > "$SEC2_CONF"
+<IfModule security2_module>
+        # Default Debian dir for modsecurity's persistent data
+        SecDataDir /var/cache/modsecurity
+
+        # Include all configuration files in /etc/modsecurity (modsecurity.conf, utilsec_shield.conf)
+        IncludeOptional /etc/modsecurity/*.conf
+
+        # Include OWASP ModSecurity CRS rules (owasp-crs.load loads crs-setup.conf and all rules cleanly)
+        IncludeOptional /usr/share/modsecurity-crs/*.load
+</IfModule>
+EOF
+    elif [[ -d "/usr/share/modsecurity-crs/rules" ]]; then
+        # Fallback for systems without .load file
+        cat << 'EOF' > "$SEC2_CONF"
 <IfModule security2_module>
         # Default Debian dir for modsecurity's persistent data
         SecDataDir /var/cache/modsecurity
@@ -104,16 +136,23 @@ if [[ -f "$SEC2_CONF" ]]; then
         # Include all configuration files in /etc/modsecurity
         IncludeOptional /etc/modsecurity/*.conf
 
-        # Include OWASP ModSecurity CRS setup if available
+        # Include OWASP ModSecurity CRS setup and rules
         IncludeOptional /etc/modsecurity/crs/crs-setup.conf
-        IncludeOptional /etc/modsecurity/crs/*.conf
-
-        # Include OWASP ModSecurity CRS rules (CRS v3 and legacy v2 paths)
-        IncludeOptional /usr/share/modsecurity-crs/*.load
         IncludeOptional /usr/share/modsecurity-crs/rules/*.conf
 </IfModule>
 EOF
-    log_success "$SEC2_CONF actualizado con soporte para OWASP CRS v2 y v3."
+    else
+        cat << 'EOF' > "$SEC2_CONF"
+<IfModule security2_module>
+        # Default Debian dir for modsecurity's persistent data
+        SecDataDir /var/cache/modsecurity
+
+        # Include all configuration files in /etc/modsecurity
+        IncludeOptional /etc/modsecurity/*.conf
+</IfModule>
+EOF
+    fi
+    log_success "$SEC2_CONF configurado limpiamente sin duplicados de reglas."
 fi
 
 # 6. Install UtilSec Phase-1 Instant Shield Rules
@@ -215,3 +254,4 @@ else
     echo -e "${C_YELLOW}${C_BOLD}⚠ ModSecurity se reinició. Si alguna prueba devolvió un código diferente a 403, revisa /var/log/apache2/error.log.${C_RESET}"
 fi
 echo ""
+
