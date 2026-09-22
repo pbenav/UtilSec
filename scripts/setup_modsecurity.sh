@@ -78,11 +78,9 @@ fi
 
 # 4. Enforce SecRuleEngine On and performance tuning
 log_info "Configurando SecRuleEngine en modo bloqueo ('On')..."
-if grep -qE "^[[:space:]]*#?[[:space:]]*SecRuleEngine" "$MODSEC_CONF"; then
-    sed -i -E 's/^[[:space:]]*#?[[:space:]]*SecRuleEngine[[:space:]].*/SecRuleEngine On/' "$MODSEC_CONF"
-else
-    echo "SecRuleEngine On" >> "$MODSEC_CONF"
-fi
+# Deduplicate and ensure exactly one SecRuleEngine On directive
+sed -i -E '/^[[:space:]]*#?[[:space:]]*SecRuleEngine/d' "$MODSEC_CONF"
+echo "SecRuleEngine On" >> "$MODSEC_CONF"
 
 # Performance optimization: disable SecResponseBodyAccess to avoid high CPU overhead
 sed -i 's/^[[:space:]]*SecResponseBodyAccess[[:space:]].*/SecResponseBodyAccess Off/' "$MODSEC_CONF" || true
@@ -94,8 +92,8 @@ sed -i '/^[[:space:]]*IncludeOptional[[:space:]]/d' "$MODSEC_CONF" || true
 
 log_success "SecRuleEngine configurado en modo On (bloqueo activo)."
 
-# 5. Clean rogue manual CRS includes from global Apache configurations (apache2.conf, httpd.conf)
-log_info "Limpiando posibles inclusiones manuales conflictivas en apache2.conf..."
+# 5. Clean rogue manual CRS includes and SecRuleEngine overrides from global Apache configurations
+log_info "Limpiando posibles directivas conflictivas (Includes / SecRuleEngine Off) en apache2.conf..."
 
 # If previous run disabled crs-setup.conf in /usr/share, restore it
 if [[ -f "/usr/share/modsecurity-crs/crs-setup.conf.disabled" ]]; then
@@ -115,11 +113,13 @@ for path in ['/etc/apache2/apache2.conf', '/etc/apache2/httpd.conf']:
     # Remove any manual IfModule security2_module blocks inside main apache config
     content = re.sub(r'<IfModule\s+security2_module>.*?</IfModule>', '', content, flags=re.DOTALL)
     
-    # Filter out individual rogue Include directives for CRS or ModSecurity
+    # Filter out individual rogue Include directives for CRS/ModSecurity and any rogue Sec... directives
     lines = content.splitlines()
     filtered = []
     for line in lines:
         if re.search(r'^\s*Include(Optional)?\s+.*(modsecurity|crs-setup|modsecurity-crs)', line, re.IGNORECASE):
+            continue
+        if re.search(r'^\s*Sec[A-Za-z0-9]+\s+', line, re.IGNORECASE):
             continue
         filtered.append(line)
     
@@ -128,8 +128,11 @@ for path in ['/etc/apache2/apache2.conf', '/etc/apache2/httpd.conf']:
         shutil.copyfile(path, path + '.bak_utilsec')
         with open(path, 'w', encoding='utf-8') as f:
             f.write(new_content)
-        print(f"[OK] Inclusiones manuales eliminadas de {path} (respaldo en {path}.bak_utilsec)")
+        print(f"[OK] Directivas manuales de ModSecurity / SecRuleEngine eliminadas de {path} (respaldo en {path}.bak_utilsec)")
 PYEOF
+
+# Clean any residual SecRuleEngine Off or DetectionOnly across all apache configuration files except security2.conf
+find /etc/apache2/ -maxdepth 2 -name "*.conf" ! -name "security2.conf" -exec sed -i -E '/^[[:space:]]*SecRuleEngine[[:space:]]+(Off|DetectionOnly)/d' {} + 2>/dev/null || true
 
 # 6. Resolve and isolate OWASP CRS Setup file
 mkdir -p "$MODSEC_DIR/crs"
