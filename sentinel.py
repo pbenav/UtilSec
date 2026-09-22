@@ -136,7 +136,8 @@ def main():
                 firewall.kill_active_connections(ip)
 
             event, should_ban, ban_reason = detector.analyze_request(
-                ip=ip, method=method, url=url, status_code=status, raw_line=raw_line, source_log=source_log
+                ip=ip, method=method, url=url, status_code=status, raw_line=raw_line, source_log=source_log,
+                is_banned=bool(already_banned)
             )
 
             if event:

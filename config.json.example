@@ -33,7 +33,7 @@
     {
       "id": "env_leaks",
       "name": "Environment / Config Leaks",
-      "pattern": "\\.env(\\.[a-zA-Z0-9_.-]+)?$|\\.aws/credentials|rclone\\.conf|\\.vscode/sftp\\.json|wp-config\\.php",
+      "pattern": "\\.env([.~a-zA-Z0-9_-]+)?$|\\.aws/credentials|rclone\\.conf|\\.vscode/sftp\\.json|wp-config\\.php|\\.(esmtprc|netrc|dockercfg)",
       "is_regex": true,
       "critical": true,
       "category": "credentials"
@@ -41,7 +41,7 @@
     {
       "id": "git_leaks",
       "name": "Git Repository Leak",
-      "pattern": "\\.git(/|$)|\\.gitignore|\\.DS_Store",
+      "pattern": "\\.git([/._-]|$)|\\.gitignore|\\.gitconfig|\\.git-credentials|\\.DS_Store",
       "is_regex": true,
       "critical": true,
       "category": "credentials"

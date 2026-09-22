@@ -637,11 +637,35 @@ class TestSentinelCore(unittest.TestCase):
 
             # 2. Calling on attacker IP must execute ss -K for native and IPv4-mapped IPv6
             fw.kill_active_connections("185.204.62.50")
+            self.assertEqual(mock_run.call_count, 2)
             first_cmd = mock_run.call_args_list[0][0][0]
             second_cmd = mock_run.call_args_list[1][0][0]
-            self.assertIn("-t", first_cmd)
             self.assertIn("185.204.62.50", first_cmd)
             self.assertIn("[::ffff:185.204.62.50]", second_cmd)
 
+    def test_banned_host_activity_classification(self):
+        """When an IP is already banned, any subsequent probe must be classified as repeat_attack, not probe."""
+        from core.detector import AttackDetector
+        cfg = ConfigManager("config.json")
+        detector = AttackDetector(cfg)
 
+        # 1. Unknown 404 from non-banned IP produces category 'probe'
+        ev, should_ban, reason = detector.analyze_request("99.99.99.99", "GET", "/random-unknown.html", 404, is_banned=False)
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev.category, "probe")
+        self.assertFalse(should_ban)
 
+        # 2. Unknown 404 from already-banned IP produces category 'repeat_attack' and triggers ban
+        ev, should_ban, reason = detector.analyze_request("99.99.99.99", "GET", "/random-unknown.html", 404, is_banned=True)
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev.category, "repeat_attack")
+        self.assertTrue(should_ban)
+
+        # 3. New patterns (.env~ and .git-credentials) are recognized as critical attacks
+        ev1, ban1, _ = detector.analyze_request("99.99.99.99", "GET", "/.env~", 404)
+        self.assertEqual(ev1.category, "credentials")
+        self.assertTrue(ban1)
+
+        ev2, ban2, _ = detector.analyze_request("99.99.99.99", "GET", "/.git-credentials", 404)
+        self.assertEqual(ev2.category, "credentials")
+        self.assertTrue(ban2)

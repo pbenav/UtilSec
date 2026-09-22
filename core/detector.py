@@ -52,6 +52,7 @@ class AttackDetector:
         status_code: int,
         raw_line: str = "",
         source_log: str = "",
+        is_banned: bool = False,
     ) -> Tuple[Optional[AttackEvent], bool, str]:
         """
         Analyzes an HTTP request.
@@ -93,10 +94,25 @@ class AttackDetector:
                     raw_line=raw_line,
                     source_log=source_log,
                 )
-                # If rule is critical or status is 404/403/500, ban immediately!
-                if rule.critical or status_code in (404, 403):
+                # If rule is critical, host is already banned, or status is 404/403/500, ban immediately!
+                if rule.critical or is_banned or status_code in (404, 403):
                     return event, True, f"Attack Signature: {rule.name}"
                 return event, False, ""
+
+        # 1b. If the host is already known to be banned, any probe/error is a confirmed repeat attack!
+        if is_banned and status_code in (400, 401, 403, 404, 405, 500):
+            self.total_attacks_detected += 1
+            event = AttackEvent(
+                ip=ip,
+                method=method,
+                url=url,
+                status_code=status_code,
+                matched_rule=f"Banned Host Activity ({status_code})",
+                category="repeat_attack",
+                raw_line=raw_line,
+                source_log=source_log,
+            )
+            return event, True, f"Repeat Attack from Banned IP ({status_code})"
 
         # 2. HTTP 403 Forbidden Access Handling (Default: Instant ban on 1st attempt!)
         if status_code == 403:

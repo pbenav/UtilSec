@@ -373,7 +373,10 @@ class SentinelTUI:
                     disp = f"{txt:<{stream_w - len(tag) - 1}} {tag}"[:stream_w]
                     color = (
                         self.C_ALERT
-                        if ev.category in ("credentials", "webshell", "traversal", "rate_limit", "heuristic", "user")
+                        if ev.category in (
+                            "credentials", "webshell", "traversal", "exploit",
+                            "forbidden", "rate_limit", "repeat_attack", "heuristic", "user"
+                        )
                         else self.C_WARN
                     )
                     stdscr.addstr(y, start_x, disp, curses.color_pair(color))
@@ -1593,9 +1596,10 @@ class SentinelTUI:
                     "rate_limit": self.C_WARN,
                     "heuristic": self.C_WARN,
                     "user": self.C_WARN,
-                    "forbidden": self.C_INFO,
+                    "forbidden": self.C_ALERT,
                     "probe": self.C_DEFAULT,
                     "exploit": self.C_ALERT,
+                    "repeat_attack": self.C_ALERT,
                 }
                 max_items = cat_avail_h - 1
                 for i, (cat, count, pct) in enumerate(categories[:max_items]):
