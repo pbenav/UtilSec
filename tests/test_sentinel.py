@@ -669,3 +669,104 @@ class TestSentinelCore(unittest.TestCase):
         ev2, ban2, _ = detector.analyze_request("99.99.99.99", "GET", "/.git-credentials", 404)
         self.assertEqual(ev2.category, "credentials")
         self.assertTrue(ban2)
+
+    def test_kill_active_connections_cidr(self):
+        """kill_active_connections must preserve CIDR masks for both IPv4 and IPv6-mapped dual stack."""
+        from core.firewall import FirewallManager
+        cfg = ConfigManager("config.json")
+        fw = FirewallManager(config=cfg)
+        fw.dry_run = False
+
+        import unittest.mock as mock
+        with mock.patch("subprocess.run") as mock_run:
+            fw.kill_active_connections("35.205.254.0/24")
+            self.assertEqual(mock_run.call_count, 2)
+            first_cmd = mock_run.call_args_list[0][0][0]
+            second_cmd = mock_run.call_args_list[1][0][0]
+            # Native IPv4 must retain /24
+            self.assertIn("35.205.254.0/24", first_cmd)
+            # Dual-stack IPv6 must convert /24 to /120 (96 + 24)
+            self.assertIn("[::ffff:35.205.254.0/120]", second_cmd)
+
+    def test_cloud_and_ai_credential_leak_detection(self):
+        """Cloud and AI API credential leak attempts must trigger instant critical bans on hit 1."""
+        from core.detector import AttackDetector
+        cfg = ConfigManager("config.json")
+        detector = AttackDetector(cfg)
+
+        probes = [
+            "/.docker/secret",
+            "/.docker/",
+            "/.aws/credentials",
+            "/.aws/config",
+            "/.amplifyrc",
+            "/.config/gcloud",
+            "/.config/anthropic",
+            "/.claude/settings",
+            "/.aws/.env",
+            "/.anthropic/config",
+            "/.kube/config",
+            "/.azure/credentials",
+            "/.boto",
+        ]
+
+        for url in probes:
+            ev, should_ban, reason = detector.analyze_request("35.205.254.119", "GET", url, 404)
+            self.assertIsNotNone(ev, f"Expected event for {url}")
+            self.assertEqual(ev.category, "credentials", f"Expected credentials category for {url}")
+            self.assertTrue(should_ban, f"Expected instant ban for {url}")
+
+    def test_dedicated_iptables_chains(self):
+        """FirewallManager must configure dedicated UTILSEC-WHITELIST and UTILSEC-BAN chains and use DROP."""
+        from core.firewall import FirewallManager
+        cfg = ConfigManager("config.json")
+        fw = FirewallManager(config=cfg)
+        fw.dry_run = False
+        fw.active_backend = "iptables"
+
+        import unittest.mock as mock
+        with mock.patch("subprocess.run") as mock_run:
+            def fake_run(cmd, *args, **kwargs):
+                m = mock.MagicMock()
+                if "-C" in cmd:
+                    m.returncode = 1  # Rule does not exist yet
+                else:
+                    m.returncode = 0
+                if "-S" in cmd:
+                    m.stdout = b"-A INPUT -j UTILSEC-WHITELIST\n-A INPUT -j UTILSEC-BAN\n"
+                return m
+
+            mock_run.side_effect = fake_run
+
+            # 1. Chain initialization
+            count = fw._init_iptables_chains()
+            self.assertGreater(count, 0)
+
+            # 2. Ban execution must target UTILSEC-BAN with -j DROP
+            mock_run.reset_mock()
+            from core.models import BanRecord
+            rec = BanRecord(
+                ip="45.138.12.0/24",
+                reason="Test Cloud Leak",
+                matched_pattern="cloud_leaks",
+                attack_count=1,
+                banned_at=time.time(),
+                ban_duration=3600,
+                backend="iptables"
+            )
+            fw._exec_ban_system(rec)
+
+            called_cmds = [call[0][0] for call in mock_run.call_args_list]
+            ban_cmd = next((c for c in called_cmds if "UTILSEC-BAN" in c and "-I" in c), None)
+            self.assertIsNotNone(ban_cmd, "Ban command must target UTILSEC-BAN chain")
+            self.assertIn("-j", ban_cmd)
+            self.assertIn("DROP", ban_cmd)
+            self.assertIn("45.138.12.0/24", ban_cmd)
+
+            # 3. Unban execution must target UTILSEC-BAN
+            mock_run.reset_mock()
+            fw._exec_unban_system(rec)
+            unban_called_cmds = [call[0][0] for call in mock_run.call_args_list]
+            unban_cmd = next((c for c in unban_called_cmds if "UTILSEC-BAN" in c and "-D" in c), None)
+            self.assertIsNotNone(unban_cmd, "Unban command must target UTILSEC-BAN chain")
+            self.assertIn("DROP", unban_cmd)

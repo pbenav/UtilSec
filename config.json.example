@@ -31,6 +31,14 @@
   ],
   "heuristic_rules": [
     {
+      "id": "cloud_leaks",
+      "name": "Cloud & AI Credential Leak",
+      "pattern": "/\\.(aws|docker|kube|azure|claude|anthropic)(/|$)|/\\.config/(gcloud|anthropic|gh|op)(/|$)|\\.(boto|amplifyrc)",
+      "is_regex": true,
+      "critical": true,
+      "category": "credentials"
+    },
+    {
       "id": "env_leaks",
       "name": "Environment / Config Leaks",
       "pattern": "\\.env([.~a-zA-Z0-9_-]+)?$|\\.aws/credentials|rclone\\.conf|\\.vscode/sftp\\.json|wp-config\\.php|\\.(esmtprc|netrc|dockercfg)",

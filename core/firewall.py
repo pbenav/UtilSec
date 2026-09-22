@@ -85,6 +85,10 @@ class FirewallManager:
 
                     self.active_bans[target] = record
 
+        # Step 1.5: If starting in LIVE mode, ensure dedicated chains and whitelist rules are active first
+        if not self.dry_run:
+            self._ensure_whitelist_rules()
+
         # Step 2: Sync with actual firewall state (restore bans that exist in firewall but not in memory)
         if not self.dry_run:
             self._sync_bans_with_firewall()
@@ -570,11 +574,122 @@ class FirewallManager:
             logger.debug("Error detecting fail2ban jail: %s", e)
             return ""
 
+    def _init_iptables_chains(self, whitelist_nets: Optional[List] = None) -> int:
+        """Initializes dedicated UtilSec chains in iptables for 100% reliable traffic isolation:
+
+        INPUT Chain Layout:
+          Position 1: -j UTILSEC-WHITELIST (ACCEPT whitelisted traffic, never blocked)
+          Position 2: -j UTILSEC-BAN       (DROP banned traffic immediately before any port/service ACCEPT)
+          Position 3+: System rules        (UFW, Apache, ESTABLISHED, SSH, etc.)
+        """
+        if self.dry_run or self.active_backend != "iptables":
+            return 0
+
+        is_root = os.geteuid() == 0
+        prefix = [] if is_root else ["sudo", "-n"]
+        if whitelist_nets is None:
+            whitelist_nets = self._get_whitelist_networks()
+
+        try:
+            # 1. Ensure custom chains exist (-N)
+            for chain in ("UTILSEC-WHITELIST", "UTILSEC-BAN"):
+                subprocess.run(
+                    prefix + ["iptables", "-w", "5", "-N", chain],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5
+                )
+
+            # 2. Check if jumps exist in INPUT
+            res_wl = subprocess.run(
+                prefix + ["iptables", "-w", "5", "-C", "INPUT", "-j", "UTILSEC-WHITELIST"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5
+            )
+            if res_wl.returncode != 0:
+                subprocess.run(
+                    prefix + ["iptables", "-w", "5", "-I", "INPUT", "1", "-j", "UTILSEC-WHITELIST"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5
+                )
+
+            res_ban = subprocess.run(
+                prefix + ["iptables", "-w", "5", "-C", "INPUT", "-j", "UTILSEC-BAN"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5
+            )
+            if res_ban.returncode != 0:
+                subprocess.run(
+                    prefix + ["iptables", "-w", "5", "-I", "INPUT", "2", "-j", "UTILSEC-BAN"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5
+                )
+
+            # 3. Ensure exact order in INPUT: rule 1 must be UTILSEC-WHITELIST, rule 2 must be UTILSEC-BAN
+            res_s = subprocess.run(
+                prefix + ["iptables", "-w", "5", "-S", "INPUT"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5
+            )
+            if res_s.returncode == 0:
+                lines = [line.strip() for line in res_s.stdout.decode("utf-8", errors="replace").splitlines() if line.strip().startswith("-A INPUT")]
+                need_reorder = False
+                if len(lines) >= 1 and "-j UTILSEC-WHITELIST" not in lines[0]:
+                    need_reorder = True
+                if len(lines) >= 2 and "-j UTILSEC-BAN" not in lines[1]:
+                    need_reorder = True
+
+                if need_reorder:
+                    # Remove any existing jumps to UTILSEC chains from INPUT
+                    for _ in range(5):
+                        del_wl = subprocess.run(prefix + ["iptables", "-w", "5", "-D", "INPUT", "-j", "UTILSEC-WHITELIST"],
+                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                        if del_wl.returncode != 0:
+                            break
+                    for _ in range(5):
+                        del_ban = subprocess.run(prefix + ["iptables", "-w", "5", "-D", "INPUT", "-j", "UTILSEC-BAN"],
+                                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                        if del_ban.returncode != 0:
+                            break
+                    # Re-insert in exact order: UTILSEC-BAN first, then UTILSEC-WHITELIST at 1 (so WHITELIST is 1, BAN is 2)
+                    subprocess.run(prefix + ["iptables", "-w", "5", "-I", "INPUT", "1", "-j", "UTILSEC-BAN"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                    subprocess.run(prefix + ["iptables", "-w", "5", "-I", "INPUT", "1", "-j", "UTILSEC-WHITELIST"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                    logger.info("Ensured UTILSEC-WHITELIST at INPUT position 1 and UTILSEC-BAN at position 2")
+
+            # 4. Sync the UTILSEC-WHITELIST chain
+            return self._sync_whitelist_chain(whitelist_nets)
+
+        except Exception as e:
+            logger.error("Error setting up dedicated iptables chains: %s", e)
+            return 0
+
+    def _sync_whitelist_chain(self, whitelist_nets: Optional[List] = None) -> int:
+        """Populates the UTILSEC-WHITELIST chain with all whitelisted networks."""
+        if self.dry_run or self.active_backend != "iptables":
+            return 0
+        is_root = os.geteuid() == 0
+        prefix = [] if is_root else ["sudo", "-n"]
+        if whitelist_nets is None:
+            whitelist_nets = self._get_whitelist_networks()
+        count = 0
+        try:
+            # Flush existing rules in UTILSEC-WHITELIST
+            subprocess.run(prefix + ["iptables", "-w", "5", "-F", "UTILSEC-WHITELIST"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            # Add each whitelisted network with -j ACCEPT
+            for wnet in whitelist_nets:
+                wnet_str = str(wnet)
+                subprocess.run(
+                    prefix + ["iptables", "-w", "5", "-A", "UTILSEC-WHITELIST", "-s", wnet_str, "-j", "ACCEPT",
+                              "-m", "comment", "--comment", "UtilSec-Whitelist"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5
+                )
+                count += 1
+            logger.info("UTILSEC-WHITELIST chain populated with %d networks", count)
+        except Exception as e:
+            logger.error("Error syncing UTILSEC-WHITELIST chain: %s", e)
+        return count
+
     def _ensure_whitelist_rules(self, whitelist_nets: Optional[List] = None) -> int:
-        """Ensure whitelist IPs have ACCEPT rules at the TOP of the INPUT chain.
+        """Ensure whitelist IPs have ACCEPT rules evaluated before any ban rules.
         
-        This is CRITICAL: whitelist rules must always exist and be before any DROP rules.
-        Returns: number of whitelist rules added/verified.
+        For iptables: initializes dedicated UTILSEC-WHITELIST and UTILSEC-BAN chains.
+        For ufw: inserts allow rules at the top of ufw rules.
         """
         if self.dry_run:
             return 0
@@ -585,48 +700,13 @@ class FirewallManager:
         if not whitelist_nets:
             return 0
 
-        count = 0
-        is_root = os.geteuid() == 0
-        prefix = [] if is_root else ["sudo", "-n"]
-
         if self.active_backend == "iptables":
-            try:
-                # Check current rules with iptables -S INPUT
-                res = subprocess.run(
-                    prefix + ["iptables", "-S", "INPUT"],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
-                )
-                output = res.stdout.decode("utf-8", errors="replace") if res.returncode == 0 else ""
-                existing_rules = set()
-                for line in output.splitlines():
-                    if "-j ACCEPT" in line:
-                        parts = line.split()
-                        for i, part in enumerate(parts):
-                            if part == "-s" and i + 1 < len(parts):
-                                existing_rules.add(parts[i + 1])
-
-                # Insert from last to first at position 1 so they end up in order 1..N
-                for wnet in reversed(whitelist_nets):
-                    wnet_str = str(wnet)
-                    cidr_str = f"{wnet_str}/32" if "/" not in wnet_str and getattr(wnet, "version", 4) == 4 else wnet_str
-                    if wnet_str in existing_rules or cidr_str in existing_rules:
-                        count += 1
-                        continue
-
-                    # Insert ACCEPT rule at position 1 (top of INPUT chain)
-                    cmd = prefix + [
-                        "iptables", "-w", "5", "-I", "INPUT", "1",
-                        "-s", wnet_str, "-j", "ACCEPT",
-                        "-m", "comment", "--comment", "UtilSec-Whitelist"
-                    ]
-                    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
-                    count += 1
-                    logger.info("Added whitelist ACCEPT rule for %s at top of INPUT chain", wnet_str)
-
-            except Exception as e:
-                logger.error("Error ensuring whitelist rules: %s", e)
+            return self._init_iptables_chains(whitelist_nets)
 
         elif self.active_backend == "ufw":
+            count = 0
+            is_root = os.geteuid() == 0
+            prefix = [] if is_root else ["sudo", "-n"]
             try:
                 res = subprocess.run(
                     prefix + ["ufw", "status"],
@@ -644,21 +724,23 @@ class FirewallManager:
                         count += 1
             except Exception as e:
                 logger.error("Error ensuring ufw whitelist rules: %s", e)
+            return count
 
-        return count
+        return len(whitelist_nets)
 
     def kill_active_connections(self, ip: str) -> None:
         """Forcibly close active TCP sockets (Keep-Alive) for an attacking IP or subnet.
 
         Terminates both native IPv4/IPv6 and IPv4-mapped IPv6 sockets (::ffff:x.x.x.x),
         which are standard when web servers like Apache or Nginx listen on dual-stack [::].
+        Supports CIDR notation (e.g. 35.205.254.0/24) to terminate all sockets across the subnet.
         """
         if self.dry_run or not shutil.which("ss"):
             return
 
         is_root = os.geteuid() == 0
         prefix = [] if is_root else ["sudo", "-n"]
-        kill_target = ip.split("/")[0] if "/" in ip else ip
+        kill_target = ip.strip()
 
         # Never kill sockets belonging to whitelisted IPs
         if self.is_ip_whitelisted(kill_target):
@@ -666,27 +748,37 @@ class FirewallManager:
 
         try:
             # 1. Terminate native TCP destination socket (-t is strictly required by kernel inet_diag)
+            # ss natively accepts CIDR notation (e.g. 35.205.254.0/24) to kill all sockets matching the range
             subprocess.run(
                 prefix + ["ss", "-t", "-K", "dst", kill_target],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
             )
             # 2. Terminate IPv4-mapped IPv6 socket if target is IPv4 (brackets required by ss IPv6 parser)
             if ":" not in kill_target:
-                subprocess.run(
-                    prefix + ["ss", "-t", "-K", "dst", f"[::ffff:{kill_target}]"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
-                )
+                if "/" in kill_target:
+                    v4_ip, prefix_len = kill_target.split("/")
+                    v6_prefix = 96 + int(prefix_len)
+                    subprocess.run(
+                        prefix + ["ss", "-t", "-K", "dst", f"[::ffff:{v4_ip}/{v6_prefix}]"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
+                    )
+                else:
+                    subprocess.run(
+                        prefix + ["ss", "-t", "-K", "dst", f"[::ffff:{kill_target}]"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
+                    )
             # 3. If conntrack CLI is available, purge state tracking entry
             if shutil.which("conntrack"):
+                clean_target = kill_target.split("/")[0] if "/" in kill_target else kill_target
                 subprocess.run(
-                    prefix + ["conntrack", "-D", "-s", kill_target],
+                    prefix + ["conntrack", "-D", "-s", clean_target],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
                 )
                 subprocess.run(
-                    prefix + ["conntrack", "-D", "-d", kill_target],
+                    prefix + ["conntrack", "-D", "-d", clean_target],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
                 )
-            logger.info("Executed connection kill (ss -t -K) for attacker IP %s", kill_target)
+            logger.info("Executed connection kill (ss -t -K) for attacker IP/subnet %s", kill_target)
         except Exception as e:
             logger.debug("Failed to terminate active sockets for %s: %s", kill_target, e)
 
@@ -704,8 +796,9 @@ class FirewallManager:
         insert_pos = str(whitelist_offset + 1)
 
         if self.active_backend == "iptables":
-            check_cmd = prefix + ["iptables", "-w", "5", "-C", "INPUT", "-s", ip, "-j", "DROP", "-m", "comment", "--comment", "UtilSec"]
-            cmd = prefix + ["iptables", "-w", "5", "-I", "INPUT", insert_pos, "-s", ip, "-j", "DROP", "-m", "comment", "--comment", "UtilSec"]
+            # Primary target is the dedicated UTILSEC-BAN chain (guaranteed evaluated at INPUT position 2)
+            check_cmd = prefix + ["iptables", "-w", "5", "-C", "UTILSEC-BAN", "-s", ip, "-j", "DROP", "-m", "comment", "--comment", "UtilSec"]
+            cmd = prefix + ["iptables", "-w", "5", "-I", "UTILSEC-BAN", "1", "-s", ip, "-j", "DROP", "-m", "comment", "--comment", "UtilSec"]
             if not self.dry_run:
                 try:
                     exists = subprocess.run(check_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
@@ -721,7 +814,7 @@ class FirewallManager:
             cmd = prefix + ["nft", "add", "element", "inet", "filter", "utilsec_bans", f"{{ {ip} }}"]
 
         # If dry-run or failed execution, log to script
-        cmd_str = " ".join(cmd) if cmd else f"iptables -I INPUT {insert_pos} -s {ip} -j DROP # UtilSec ({record.reason})"
+        cmd_str = " ".join(cmd) if cmd else f"iptables -I UTILSEC-BAN 1 -s {ip} -j DROP # UtilSec ({record.reason})"
         with open("banned_ips.sh", "a", encoding="utf-8") as f:
             f.write(f"# [{datetime.now().isoformat()}] {record.reason} (URL: {record.last_url})\n{cmd_str}\n")
 
@@ -730,8 +823,18 @@ class FirewallManager:
                 subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
             except subprocess.CalledProcessError as e:
                 err_msg = e.stderr.decode("utf-8", errors="replace").strip()
-                logger.error("Failed to execute ban on %s: %s (stderr: %s)", ip, e, err_msg)
-                record.status = "ERROR"
+                # Fallback to direct INPUT chain insertion if custom chain is not present
+                if self.active_backend == "iptables" and "No chain/target/match by that name" in err_msg:
+                    try:
+                        fallback_cmd = prefix + ["iptables", "-w", "5", "-I", "INPUT", insert_pos, "-s", ip, "-j", "DROP", "-m", "comment", "--comment", "UtilSec"]
+                        subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                        logger.info("Fell back to INPUT chain insertion for %s", ip)
+                    except Exception as fb_err:
+                        logger.error("Fallback ban failed for %s: %s", ip, fb_err)
+                        record.status = "ERROR"
+                else:
+                    logger.error("Failed to execute ban on %s: %s (stderr: %s)", ip, e, err_msg)
+                    record.status = "ERROR"
             except Exception as e:
                 logger.error("Failed to execute ban on %s: %s", ip, e)
                 record.status = "ERROR"
@@ -747,23 +850,25 @@ class FirewallManager:
         prefix = [] if is_root else ["sudo", "-n"]
 
         if self.active_backend == "iptables":
-            cmd = prefix + ["iptables", "-w", "5", "-D", "INPUT", "-s", ip, "-j", "DROP", "-m", "comment", "--comment", "UtilSec"]
+            cmd = prefix + ["iptables", "-w", "5", "-D", "UTILSEC-BAN", "-s", ip, "-j", "DROP", "-m", "comment", "--comment", "UtilSec"]
         elif self.active_backend == "ufw":
             cmd = prefix + ["ufw", "delete", "deny", "from", ip, "to", "any"]
         elif self.active_backend == "nft":
             cmd = prefix + ["nft", "delete", "element", "inet", "filter", "utilsec_bans", f"{{ {ip} }}"]
 
-        cmd_str = " ".join(cmd) if cmd else f"iptables -D INPUT -s {ip} -j DROP # UtilSec unban"
+        cmd_str = " ".join(cmd) if cmd else f"iptables -D UTILSEC-BAN -s {ip} -j DROP # UtilSec unban"
         with open("unban_ips.sh", "a", encoding="utf-8") as f:
             f.write(f"# [{datetime.now().isoformat()}] Unban {ip}\n{cmd_str}\n")
 
         if not self.dry_run and cmd:
             try:
                 res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if res.returncode != 0 and self.active_backend == "iptables":
-                    # Fallback without comment in case rule was inserted without comment
-                    fallback_cmd = prefix + ["iptables", "-w", "5", "-D", "INPUT", "-s", ip, "-j", "DROP"]
-                    subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if self.active_backend == "iptables":
+                    # Fallback / cleanup: also remove from INPUT chain in case rule was inserted there previously
+                    subprocess.run(prefix + ["iptables", "-w", "5", "-D", "INPUT", "-s", ip, "-j", "DROP", "-m", "comment", "--comment", "UtilSec"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.run(prefix + ["iptables", "-w", "5", "-D", "INPUT", "-s", ip, "-j", "DROP"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as e:
                 logger.error("Failed to execute unban on %s: %s", ip, e)
 
@@ -795,6 +900,35 @@ class FirewallManager:
         try:
             is_root = os.geteuid() == 0
             prefix = [] if is_root else ["sudo", "-n"]
+
+            # 1. Scan dedicated UTILSEC-BAN chain if it exists
+            res_ban = subprocess.run(
+                prefix + ["iptables", "-L", "UTILSEC-BAN", "-n", "--line-numbers", "-v"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+            )
+            if res_ban.returncode == 0:
+                lines = res_ban.stdout.decode("utf-8", errors="replace").splitlines()
+                for line in lines:
+                    line = line.strip()
+                    if not line or line.startswith("Chain ") or "target" in line.lower() or "pkts" in line.lower():
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        try:
+                            rule_num = int(parts[0])
+                        except (ValueError, IndexError):
+                            continue
+                        ip = self._extract_ip_from_iptables_line(line)
+                        if ip:
+                            rules.append(FirewallRuleInfo(
+                                ip=ip,
+                                source="utilsec",
+                                reason="UtilSec ban rule",
+                                rule_num=rule_num,
+                                backend="iptables",
+                            ))
+
+            # 2. Scan INPUT chain for fail2ban, manual, and any legacy UtilSec rules
             result = subprocess.run(
                 prefix + ["iptables", "-L", "INPUT", "-n", "--line-numbers", "-v"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
@@ -803,7 +937,6 @@ class FirewallManager:
                 return rules
 
             lines = result.stdout.decode("utf-8", errors="replace").splitlines()
-            # Find chain header
             chain_idx = None
             for i, line in enumerate(lines):
                 if "chain input" in line.lower():
@@ -812,13 +945,11 @@ class FirewallManager:
             if chain_idx is None:
                 return rules
 
-            # Scan from chain header for rules
             for i in range(chain_idx + 1, len(lines)):
                 line = lines[i].strip()
-                if not line or line.startswith("chain ") or "target" in line.lower():
+                if not line or line.startswith("Chain ") or "target" in line.lower() or "pkts" in line.lower():
                     continue
 
-                # Extract rule number (first field)
                 parts = line.split()
                 if not parts:
                     continue
@@ -827,23 +958,23 @@ class FirewallManager:
                 except (ValueError, IndexError):
                     continue
 
-                # Classify by comment/chain
+                # Skip jump rules to UTILSEC chains
+                if "UTILSEC-" in line:
+                    continue
+
                 if "UtilSec" in line:
-                    # Extract IP
                     ip = self._extract_ip_from_iptables_line(line)
-                    if ip:
+                    if ip and not any(r.ip == ip for r in rules):
                         rules.append(FirewallRuleInfo(
                             ip=ip,
                             source="utilsec",
-                            reason="UtilSec ban rule",
+                            reason="UtilSec ban rule (legacy INPUT)",
                             rule_num=rule_num,
                             backend="iptables",
                         ))
                 elif "fail2ban" in line:
-                    # Extract IP
                     ip = self._extract_ip_from_iptables_line(line)
                     if ip:
-                        # Try to detect jail name from line
                         jail_name = ""
                         if "fail2ban-" in line:
                             jail_name = line.split("fail2ban-")[1].split()[0].rstrip(",")
@@ -856,9 +987,8 @@ class FirewallManager:
                             jail_name=jail_name,
                         ))
                 elif "DROP" in line or "REJECT" in line:
-                    # Manual rule - not UtilSec, not fail2ban
                     ip = self._extract_ip_from_iptables_line(line)
-                    if ip:
+                    if ip and not any(r.ip == ip for r in rules):
                         rules.append(FirewallRuleInfo(
                             ip=ip,
                             source="manual",
