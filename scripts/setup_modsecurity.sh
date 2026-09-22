@@ -164,7 +164,14 @@ SEC2_ENABLED="/etc/apache2/mods-enabled/security2.conf"
 
 log_info "Configurando inclusión limpia y determinista en security2.conf..."
 
-cat << 'EOF' > "$SEC2_AVAILABLE"
+CRS_RULES_DIR=""
+if [[ -d "/usr/share/modsecurity-crs/rules" ]]; then
+    CRS_RULES_DIR="/usr/share/modsecurity-crs/rules/*.conf"
+elif [[ -d "/etc/modsecurity/crs/rules" ]]; then
+    CRS_RULES_DIR="/etc/modsecurity/crs/rules/*.conf"
+fi
+
+cat << EOF > "$SEC2_AVAILABLE"
 <IfModule security2_module>
         # Default Debian dir for modsecurity's persistent data
         SecDataDir /var/cache/modsecurity
@@ -185,8 +192,7 @@ cat << 'EOF' > "$SEC2_AVAILABLE"
         IncludeOptional /etc/modsecurity/crs/crs-setup.conf
 
         # 4. OWASP CRS Detection Rules
-        IncludeOptional /usr/share/modsecurity-crs/rules/*.conf
-        IncludeOptional /etc/modsecurity/crs/rules/*.conf
+        IncludeOptional $CRS_RULES_DIR
 </IfModule>
 EOF
 
