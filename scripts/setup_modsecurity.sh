@@ -154,6 +154,16 @@ if [[ -f "$MODSEC_DIR/crs-setup.conf" ]]; then
     rm -f "$MODSEC_DIR/crs-setup.conf"
 fi
 
+# Determine CRS rules inclusion directive dynamically
+CRS_RULES_INCLUDE=""
+if compgen -G "/etc/modsecurity/crs/rules/*.conf" > /dev/null 2>&1; then
+    CRS_RULES_INCLUDE="IncludeOptional /etc/modsecurity/crs/rules/*.conf"
+elif compgen -G "/usr/share/modsecurity-crs/rules/*.conf" > /dev/null 2>&1; then
+    CRS_RULES_INCLUDE="IncludeOptional /usr/share/modsecurity-crs/rules/*.conf"
+elif compgen -G "/usr/share/modsecurity-crs/owasp-crs.load" > /dev/null 2>&1; then
+    CRS_RULES_INCLUDE="IncludeOptional /usr/share/modsecurity-crs/owasp-crs.load"
+fi
+
 # Ensure cache directory exists and has correct permissions
 mkdir -p /var/cache/modsecurity
 chown -R www-data:www-data /var/cache/modsecurity 2>/dev/null || true
@@ -164,43 +174,37 @@ SEC2_ENABLED="/etc/apache2/mods-enabled/security2.conf"
 
 log_info "Configurando inclusión limpia y determinista en security2.conf..."
 
-CRS_RULES_DIR=""
-if [[ -d "/usr/share/modsecurity-crs/rules" ]]; then
-    CRS_RULES_DIR="/usr/share/modsecurity-crs/rules/*.conf"
-elif [[ -d "/etc/modsecurity/crs/rules" ]]; then
-    CRS_RULES_DIR="/etc/modsecurity/crs/rules/*.conf"
-fi
-
 cat << EOF > "$SEC2_AVAILABLE"
 <IfModule security2_module>
         # Default Debian dir for modsecurity's persistent data
         SecDataDir /var/cache/modsecurity
 
-        # Ensure SecRuleEngine is active globally
+        # 1. Base ModSecurity engine configuration
+        IncludeOptional /etc/modsecurity/modsecurity.conf
+
+        # 2. UtilSec Phase-1 Instant Shield Rules (Runs before CRS for lightning-fast 403)
+        IncludeOptional /etc/modsecurity/utilsec_shield.conf
+
+        # 3. OWASP CRS Setup Configuration
+        IncludeOptional /etc/modsecurity/crs/crs-setup.conf
+
+        # 4. OWASP CRS Detection Rules
+        $CRS_RULES_INCLUDE
+
+        # 5. Enforce SecRuleEngine On as the final, overriding directive
         SecRuleEngine On
         SecRequestBodyAccess On
         SecResponseBodyAccess Off
         SecStatusEngine Off
-
-        # 1. Base ModSecurity engine configuration
-        IncludeOptional /etc/modsecurity/modsecurity.conf
-
-        # 2. UtilSec Instant Phase-1 Shield Rules
-        IncludeOptional /etc/modsecurity/utilsec_shield.conf
-
-        # 3. OWASP CRS Setup configuration (loaded exactly once)
-        IncludeOptional /etc/modsecurity/crs/crs-setup.conf
-
-        # 4. OWASP CRS Detection Rules
-        IncludeOptional $CRS_RULES_DIR
 </IfModule>
 EOF
 
 # Ensure mods-enabled points directly to mods-available
 mkdir -p /etc/apache2/mods-enabled
+rm -f "$SEC2_ENABLED"
 ln -sf "$SEC2_AVAILABLE" "$SEC2_ENABLED"
 
-log_success "security2.conf configurado con inclusión explícita (sin duplicados)."
+log_success "security2.conf configurado con inclusión explícita y SecRuleEngine On final."
 
 # 6. Install UtilSec Phase-1 Instant Shield Rules
 UTILSEC_RULES_FILE="$MODSEC_DIR/utilsec_shield.conf"
@@ -212,38 +216,53 @@ cat << 'EOF' > "$UTILSEC_RULES_FILE"
 # Intercepts automated vulnerability scanners before filesystem or worker lookup
 # ==============================================================================
 
-# Rule 1000001: Cloud, Docker, Git, and Sensitive Environment Files
-SecRule REQUEST_URI "@rx /(?:\.env|\.git|\.aws|\.docker|\.kube|\.ssh|\.terraform|\.claude|\.azure|\.config|\.boto|\.amplifyrc)(?:/|\?|$|[.~a-zA-Z0-9_-])" \
+# Rule 1000001: Cloud, Docker, Git, and Sensitive Environment Files in Phase 1
+SecRule REQUEST_URI "@pm .env .git .aws .docker .kube .ssh .terraform .claude .azure .config/gcloud .boto .amplifyrc" \
     "id:1000001,\
     phase:1,\
     deny,\
     status:403,\
     log,\
-    msg:'UtilSec Shield: Malicious scanner attempt blocked in Phase 1 (Credentials/Cloud/VCS)',\
+    t:none,t:urlDecodeUni,t:lowercase,\
+    msg:'UtilSec Shield: Malicious scanner target blocked in Phase 1 (Credentials/Cloud/VCS)',\
     tag:'utilsec',\
     tag:'attack-scanner'"
 
 # Rule 1000002: Common Web Backdoors & Shells in Phase 1
-SecRule REQUEST_URI "@rx /(?:hellopress|wp_filemanager|coffexium|alfa|wso|b374k|c99|r57|simattacker|c100)\.php" \
+SecRule REQUEST_URI "@pm hellopress wp_filemanager coffexium alfa.php wso.php b374k c99.php r57.php simattacker c100.php" \
     "id:1000002,\
     phase:1,\
     deny,\
     status:403,\
     log,\
+    t:none,t:urlDecodeUni,t:lowercase,\
     msg:'UtilSec Shield: Known WebShell attempt blocked in Phase 1',\
     tag:'utilsec',\
     tag:'attack-webshell'"
 
 # Rule 1000003: Path Traversal attempts in Phase 1
-SecRule REQUEST_URI "@rx (?:\.\./|\.\.%2f|@fs/|/etc/passwd|/proc/self)" \
+SecRule REQUEST_URI "@pm ../ ..%2f @fs/ /etc/passwd /proc/self" \
     "id:1000003,\
     phase:1,\
     deny,\
     status:403,\
     log,\
+    t:none,t:urlDecodeUni,t:lowercase,\
     msg:'UtilSec Shield: Path Traversal attempt blocked in Phase 1',\
     tag:'utilsec',\
     tag:'attack-traversal'"
+
+# Rule 1000004: Command Execution & Remote Shells in Query / Request in Phase 1
+SecRule ARGS|REQUEST_URI "@pm /bin/bash /bin/sh /bin/zsh cmd.exe /etc/passwd" \
+    "id:1000004,\
+    phase:1,\
+    deny,\
+    status:403,\
+    log,\
+    t:none,t:urlDecodeUni,t:lowercase,\
+    msg:'UtilSec Shield: Command execution attempt blocked in Phase 1',\
+    tag:'utilsec',\
+    tag:'attack-rce'"
 EOF
 
 chmod 644 "$UTILSEC_RULES_FILE"
@@ -258,17 +277,19 @@ a2enmod security2 || true
 mkdir -p /etc/apache2/mods-enabled
 for mod in unique_id security2; do
     if [[ -f "/etc/apache2/mods-available/${mod}.load" ]]; then
+        rm -f "/etc/apache2/mods-enabled/${mod}.load"
         ln -sf "/etc/apache2/mods-available/${mod}.load" "/etc/apache2/mods-enabled/${mod}.load"
     fi
     if [[ -f "/etc/apache2/mods-available/${mod}.conf" ]]; then
+        rm -f "/etc/apache2/mods-enabled/${mod}.conf"
         ln -sf "/etc/apache2/mods-available/${mod}.conf" "/etc/apache2/mods-enabled/${mod}.conf"
     fi
 done
 
-# Remove any SecRuleEngine Off overrides from sites-enabled
-if grep -rnE "SecRuleEngine[[:space:]]+Off" /etc/apache2/sites-enabled/ >/dev/null 2>&1; then
-    log_warn "Detectado 'SecRuleEngine Off' en sitios habilitados. Eliminando override..."
-    sed -i -E 's/^[[:space:]]*SecRuleEngine[[:space:]]+Off/SecRuleEngine On/' /etc/apache2/sites-enabled/*.conf 2>/dev/null || true
+# Remove any SecRuleEngine Off/DetectionOnly overrides from sites-enabled
+if grep -rnE "SecRuleEngine[[:space:]]+(Off|DetectionOnly)" /etc/apache2/sites-enabled/ >/dev/null 2>&1; then
+    log_warn "Detectado override de SecRuleEngine en sitios habilitados. Normalizando a 'On'..."
+    sed -i -E 's/^[[:space:]]*SecRuleEngine[[:space:]]+(Off|DetectionOnly)/SecRuleEngine On/' /etc/apache2/sites-enabled/*.conf 2>/dev/null || true
 fi
 
 # 8. Clean up any redundant conf files in conf-enabled that might load rules a second time
@@ -335,7 +356,8 @@ fi
 if [[ "$TEST_BASH_CODE" == "403" ]]; then
     log_success "Prueba 2 (http://localhost/?exec=/bin/bash) -> Código 403 Forbidden [BLOQUEO ACTIVO]"
 else
-    log_warn "Prueba 2 (http://localhost/?exec=/bin/bash) -> Código recibido: $TEST_BASH_CODE"
+    log_warn "Prueba 2 (http://localhost/?exec=/bin/bash) -> Código recibido: $TEST_BASH_CODE (Esperado: 403)"
+    ALL_OK=false
 fi
 
 echo ""
@@ -344,8 +366,13 @@ if [[ "$ALL_OK" == "true" ]]; then
     echo -e "Las peticiones maliciosas ahora serán abortadas en milisegundos con HTTP 403 antes de tocar tus webs."
 else
     echo -e "${C_YELLOW}${C_BOLD}⚠ ModSecurity se reinició, pero las pruebas devolvieron un código diferente a 403.${C_RESET}"
+    echo -e "${C_CYAN}Diagnóstico:${C_RESET}"
+    echo -e "  - Módulos cargados: $(apache2ctl -M 2>/dev/null | grep -E 'security2|unique_id' | tr '\n' ' ' || echo 'ninguno')"
+    echo -e "  - Directivas SecRuleEngine encontradas:"
+    grep -rnE "^[[:space:]]*SecRuleEngine" /etc/apache2/ /etc/modsecurity/ 2>/dev/null || true
     echo -e "${C_CYAN}Últimas líneas relevantes en /var/log/apache2/error.log:${C_RESET}"
-    tail -n 15 /var/log/apache2/error.log 2>/dev/null || true
+    tail -n 20 /var/log/apache2/error.log 2>/dev/null || true
 fi
 echo ""
+
 
