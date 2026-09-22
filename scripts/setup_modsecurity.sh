@@ -90,7 +90,44 @@ sed -i '/^[[:space:]]*IncludeOptional[[:space:]]/d' "$MODSEC_CONF" || true
 
 log_success "SecRuleEngine configurado en modo On (bloqueo activo)."
 
-# 5. Resolve and isolate OWASP CRS Setup file
+# 5. Clean rogue manual CRS includes from global Apache configurations (apache2.conf, httpd.conf)
+log_info "Limpiando posibles inclusiones manuales conflictivas en apache2.conf..."
+
+# If previous run disabled crs-setup.conf in /usr/share, restore it
+if [[ -f "/usr/share/modsecurity-crs/crs-setup.conf.disabled" ]]; then
+    mv -f "/usr/share/modsecurity-crs/crs-setup.conf.disabled" "/usr/share/modsecurity-crs/crs-setup.conf"
+fi
+
+python3 - << 'PYEOF'
+import re, os, shutil
+
+for path in ['/etc/apache2/apache2.conf', '/etc/apache2/httpd.conf']:
+    if not os.path.isfile(path):
+        continue
+    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+        content = f.read()
+    
+    orig_content = content
+    # Remove any manual IfModule security2_module blocks inside main apache config
+    content = re.sub(r'<IfModule\s+security2_module>.*?</IfModule>', '', content, flags=re.DOTALL)
+    
+    # Filter out individual rogue Include directives for CRS or ModSecurity
+    lines = content.splitlines()
+    filtered = []
+    for line in lines:
+        if re.search(r'^\s*Include(Optional)?\s+.*(modsecurity|crs-setup|modsecurity-crs)', line, re.IGNORECASE):
+            continue
+        filtered.append(line)
+    
+    new_content = '\n'.join(filtered) + '\n'
+    if new_content != orig_content:
+        shutil.copyfile(path, path + '.bak_utilsec')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+        print(f"[OK] Inclusiones manuales eliminadas de {path} (respaldo en {path}.bak_utilsec)")
+PYEOF
+
+# 6. Resolve and isolate OWASP CRS Setup file
 mkdir -p "$MODSEC_DIR/crs"
 CRS_SETUP="$MODSEC_DIR/crs/crs-setup.conf"
 
@@ -217,27 +254,18 @@ log_info "Verificando sintaxis de configuración de Apache..."
 if apache2ctl configtest >/dev/null 2>&1; then
     log_success "Sintaxis de Apache: OK."
 else
-    log_warn "Fallo en verificación inicial de sintaxis. Diagnosticando..."
+    log_warn "Fallo en verificación de sintaxis de Apache. Mostrando diagnóstico..."
     TEST_OUTPUT=$(apache2ctl configtest 2>&1 || true)
     echo "$TEST_OUTPUT"
 
-    # If duplicate ID error appears, resolve collision
-    if echo "$TEST_OUTPUT" | grep -q "Found another rule with the same id"; then
-        log_info "Detectado conflicto de ID duplicado. Resolviendo colisión de crs-setup.conf..."
-        if [[ -f "/usr/share/modsecurity-crs/crs-setup.conf" && -f "$CRS_SETUP" ]]; then
-            log_info "Renombrando /usr/share/modsecurity-crs/crs-setup.conf para evitar duplicidad..."
-            mv -f "/usr/share/modsecurity-crs/crs-setup.conf" "/usr/share/modsecurity-crs/crs-setup.conf.disabled"
-        fi
+    if echo "$TEST_OUTPUT" | grep -qE "(Found another rule with the same id|No such file)"; then
+        log_info "Inclusiones activas de CRS en /etc/apache2 y /etc/modsecurity:"
+        grep -rnE "Include(Optional)?[[:space:]]+.*(crs|modsec)" /etc/apache2/ /etc/modsecurity/ 2>/dev/null || true
     fi
 
-    # Re-test syntax
-    if apache2ctl configtest >/dev/null 2>&1; then
-        log_success "Sintaxis de Apache corregida con éxito: OK."
-    else
-        log_error "Error persistente en la sintaxis de Apache:"
-        apache2ctl configtest
-        exit 1
-    fi
+    log_error "Error en la sintaxis de Apache:"
+    apache2ctl configtest
+    exit 1
 fi
 
 # 10. Restart Apache
