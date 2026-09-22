@@ -637,11 +637,11 @@ class TestSentinelCore(unittest.TestCase):
 
             # 2. Calling on attacker IP must execute ss -K for native and IPv4-mapped IPv6
             fw.kill_active_connections("185.204.62.50")
-            self.assertEqual(mock_run.call_count, 2)
             first_cmd = mock_run.call_args_list[0][0][0]
             second_cmd = mock_run.call_args_list[1][0][0]
+            self.assertIn("-t", first_cmd)
             self.assertIn("185.204.62.50", first_cmd)
-            self.assertIn("::ffff:185.204.62.50", second_cmd)
+            self.assertIn("[::ffff:185.204.62.50]", second_cmd)
 
 
 

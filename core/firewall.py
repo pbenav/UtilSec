@@ -665,18 +665,28 @@ class FirewallManager:
             return
 
         try:
-            # 1. Terminate native destination socket
+            # 1. Terminate native TCP destination socket (-t is strictly required by kernel inet_diag)
             subprocess.run(
-                prefix + ["ss", "-K", "dst", kill_target],
+                prefix + ["ss", "-t", "-K", "dst", kill_target],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
             )
-            # 2. Terminate IPv4-mapped IPv6 socket if target is IPv4
+            # 2. Terminate IPv4-mapped IPv6 socket if target is IPv4 (brackets required by ss IPv6 parser)
             if ":" not in kill_target:
                 subprocess.run(
-                    prefix + ["ss", "-K", "dst", f"::ffff:{kill_target}"],
+                    prefix + ["ss", "-t", "-K", "dst", f"[::ffff:{kill_target}]"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
                 )
-            logger.info("Executed connection kill (ss -K) for attacker IP %s", kill_target)
+            # 3. If conntrack CLI is available, purge state tracking entry
+            if shutil.which("conntrack"):
+                subprocess.run(
+                    prefix + ["conntrack", "-D", "-s", kill_target],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
+                )
+                subprocess.run(
+                    prefix + ["conntrack", "-D", "-d", kill_target],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
+                )
+            logger.info("Executed connection kill (ss -t -K) for attacker IP %s", kill_target)
         except Exception as e:
             logger.debug("Failed to terminate active sockets for %s: %s", kill_target, e)
 
