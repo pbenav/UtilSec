@@ -390,7 +390,11 @@ class SentinelTUI:
                     )
                     # If the attacker IP is whitelisted, show in green so operator can spot overblocking
                     try:
-                        is_whitelisted = self.config.is_ip_whitelisted(ev.ip)
+                        # Normalize IP to strip ports or brackets (e.g. '1.2.3.4:54321' -> '1.2.3.4')
+                        from core.utils import normalize_ip
+
+                        n_ip = normalize_ip(ev.ip) or ev.ip
+                        is_whitelisted = self.config.is_ip_whitelisted(n_ip)
                     except Exception:
                         is_whitelisted = False
 

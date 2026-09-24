@@ -1,5 +1,5 @@
 import ipaddress
-from core.utils import is_valid_ip
+from core.utils import is_valid_ip, normalize_ip
 import logging
 import os
 import shutil
@@ -241,10 +241,17 @@ class FirewallManager:
     def is_ip_whitelisted(self, ip_str: str, config=None) -> bool:
         """Checks if an IP or subnet belongs to or overlaps with any whitelisted network."""
         ip_str = ip_str.strip()
+        # Normalize common forms (strip ports / brackets)
+        try:
+            n = normalize_ip(ip_str)
+            if n:
+                ip_str = n
+        except Exception:
+            pass
         whitelist = self._get_whitelist_networks(config)
         if not whitelist:
             return False
-        # Reject invalid IPs early
+        # Reject invalid IPs early (after normalization)
         if not is_valid_ip(ip_str) and "/" not in ip_str:
             return False
         try:
