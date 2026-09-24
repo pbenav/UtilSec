@@ -145,7 +145,7 @@ def main():
                 if tui_ref[0]:
                     tui_ref[0].add_attack_event(event)
                 elif args.headless:
-                    print(f"[!] {event.summary()}")
+                    logger.warning("%s", event.summary())
 
                 if should_ban or already_banned:
                     target = config.get_ban_target(ip)
@@ -167,10 +167,11 @@ def main():
         if os.path.exists(item["path"]):
             valid_logs.append(item)
         else:
-            print(f"[!] Warning: Log file '{item['path']}' does not exist (skipping initially).")
+            logger = logging.getLogger("UtilSec")
+            logger.warning("Warning: Log file '%s' does not exist (skipping initially).", item["path"])
 
     if not valid_logs:
-        print(f"[!] Error: None of the configured log files exist! Please check your paths.")
+        logging.getLogger("UtilSec").error("Error: None of the configured log files exist! Please check your paths.")
         sys.exit(1)
 
     watcher_mgr = LogWatcherManager(
@@ -219,19 +220,20 @@ def main():
         active_bans = len(firewall.get_active_bans_list())
         fw_status = "SIMULATION (Dry-run)" if firewall.dry_run else f"LIVE ({firewall.active_backend.upper()})"
 
-        print("=" * 64)
-        print("  🛡️  UtilSec Sentinel - Servicio detenido correctamente")
-        print("=" * 64)
-        print(f"  • Estado Cortafuegos:    {fw_status}")
-        print(f"  • Subredes/IPs Baneadas:  {active_bans}")
-        print(f"  • Ataques Detectados:     {detector.total_attacks_detected}")
-        print(f"  • Líneas Analizadas:      {detector.total_analyzed:,}")
-        print(f"  • Logs Monitorizados:     {len(valid_logs)}")
-        print(f"  • Base de datos:          sentinel_history.db")
+        logger = logging.getLogger("UtilSec")
+        logger.info("%s", "=" * 64)
+        logger.info("  🛡️  UtilSec Sentinel - Servicio detenido correctamente")
+        logger.info("%s", "=" * 64)
+        logger.info("  • Estado Cortafuegos:    %s", fw_status)
+        logger.info("  • Subredes/IPs Baneadas:  %d", active_bans)
+        logger.info("  • Ataques Detectados:     %d", detector.total_attacks_detected)
+        logger.info("  • Líneas Analizadas:      %s", f"{detector.total_analyzed:,}")
+        logger.info("  • Logs Monitorizados:     %d", len(valid_logs))
+        logger.info("  • Base de datos:          sentinel_history.db")
         if firewall.dry_run and active_bans > 0:
-            print(f"  • Script de reglas:       banned_ips.sh")
-        print("=" * 64)
-        print("  ¡Sesión finalizada con éxito! Hasta pronto.\n")
+            logger.info("  • Script de reglas:       banned_ips.sh")
+        logger.info("%s", "=" * 64)
+        logger.info("  ¡Sesión finalizada con éxito! Hasta pronto.\n")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
@@ -247,19 +249,20 @@ def main():
             watcher_mgr.stop_all()
             firewall.stop()
             import traceback
-            print("\n[!] Se produjo un error en la interfaz TUI:")
+            logger.error("Se produjo un error en la interfaz TUI:")
             traceback.print_exc()
             sys.exit(1)
         else:
             shutdown()
     else:
-        print(f"[*] UtilSec Sentinel running in HEADLESS mode.")
-        print(f"[*] Watching {len(valid_logs)} log file(s):")
+        logger = logging.getLogger("UtilSec")
+        logger.info("[*] UtilSec Sentinel running in HEADLESS mode.")
+        logger.info("[*] Watching %d log file(s):", len(valid_logs))
         for item in valid_logs:
-            print(f"    - [{item['name']}] {item['path']}")
-        print(f"[*] Firewall: {'SIMULATION' if firewall.dry_run else firewall.active_backend.upper()}")
-        print(f"[*] Ban duration: {config.default_ban_duration}s | 404 Threshold: {config.threshold_404}")
-        print(f"[*] Press Ctrl+C to stop.\n")
+            logger.info("    - [%s] %s", item["name"], item["path"])
+        logger.info("[*] Firewall: %s", 'SIMULATION' if firewall.dry_run else firewall.active_backend.upper())
+        logger.info("[*] Ban duration: %ss | 404 Threshold: %d", config.default_ban_duration, config.threshold_404)
+        logger.info("[*] Press Ctrl+C to stop.")
 
         try:
             while True:

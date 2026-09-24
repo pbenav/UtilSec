@@ -2,6 +2,7 @@
 
 import ipaddress
 import json
+import logging
 import os
 from typing import Any, Dict, List, Set, Union
 
@@ -25,10 +26,25 @@ class ConfigManager:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     self.raw_config = json.load(f)
             except Exception as e:
-                print(f"[!] Error loading {self.config_path}: {e}. Using fallback defaults.")
+                logging.getLogger("UtilSec.Config").warning(
+                    "Error loading %s: %s. Using fallback defaults.", self.config_path, e
+                )
                 self.raw_config = {}
         else:
-            self.raw_config = {}
+            # If the requested config does not exist, try to load a shipped example
+            example_path = f"{self.config_path}.example"
+            if os.path.exists(example_path):
+                try:
+                    with open(example_path, "r", encoding="utf-8") as f:
+                        self.raw_config = json.load(f)
+                    logging.getLogger("UtilSec.Config").info("Loaded configuration from %s", example_path)
+                except Exception as e:
+                    logging.getLogger("UtilSec.Config").warning(
+                        "Error loading %s: %s. Using fallback defaults.", example_path, e
+                    )
+                    self.raw_config = {}
+            else:
+                self.raw_config = {}
 
         # Set default values if missing
         self.log_file = self.raw_config.get("log_file", "logs")
@@ -119,7 +135,7 @@ class ConfigManager:
                 if ip in net:
                     return True
         except ValueError:
-            return True  # If not a valid IP, ignore to prevent crashes
+            return False
         return False
 
     def get_ban_target(self, ip_str: str) -> str:
@@ -200,5 +216,5 @@ class ConfigManager:
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(self.raw_config, f, indent=2)
         except Exception as e:
-            print(f"[!] Could not save configuration: {e}")
+            logging.getLogger("UtilSec.Config").error("Could not save configuration: %s", e)
 

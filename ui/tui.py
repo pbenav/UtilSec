@@ -317,7 +317,16 @@ class SentinelTUI:
                     line_str = line_str[: split_x - 1].ljust(split_x - 1)
 
                     attr = curses.A_REVERSE if is_sel else curses.A_NORMAL
-                    color = self.C_ALERT if ban.status == "BANNED" else self.C_WARN
+                    # If the ban target is actually in the whitelist, highlight in green
+                    try:
+                        is_whitelisted_ban = self.config.is_ip_whitelisted(ban.ip)
+                    except Exception:
+                        is_whitelisted_ban = False
+
+                    if is_whitelisted_ban:
+                        color = self.C_SUCCESS
+                    else:
+                        color = self.C_ALERT if ban.status == "BANNED" else self.C_WARN
                     if is_sel:
                         stdscr.addstr(y, 1, line_str, curses.color_pair(color) | attr | curses.A_BOLD)
                     else:
@@ -379,7 +388,16 @@ class SentinelTUI:
                         )
                         else self.C_WARN
                     )
-                    stdscr.addstr(y, start_x, disp, curses.color_pair(color))
+                    # If the attacker IP is whitelisted, show in green so operator can spot overblocking
+                    try:
+                        is_whitelisted = self.config.is_ip_whitelisted(ev.ip)
+                    except Exception:
+                        is_whitelisted = False
+
+                    if is_whitelisted:
+                        stdscr.addstr(y, start_x, disp, curses.color_pair(self.C_SUCCESS))
+                    else:
+                        stdscr.addstr(y, start_x, disp, curses.color_pair(color))
 
         # Separator before status bar
         stdscr.addstr(max_y - 3, 0, "─" * (max_x - 1), curses.color_pair(self.C_MUTED))

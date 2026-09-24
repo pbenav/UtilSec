@@ -1,4 +1,5 @@
 import ipaddress
+from core.utils import is_valid_ip
 import logging
 import os
 import shutil
@@ -242,6 +243,9 @@ class FirewallManager:
         ip_str = ip_str.strip()
         whitelist = self._get_whitelist_networks(config)
         if not whitelist:
+            return False
+        # Reject invalid IPs early
+        if not is_valid_ip(ip_str) and "/" not in ip_str:
             return False
         try:
             if "/" in ip_str:
