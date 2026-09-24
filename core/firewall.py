@@ -11,6 +11,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from core.models import BanRecord
 from core.storage import StorageManager
+from core.backends import DryRunBackend, IptablesBackend
 
 logger = logging.getLogger("UtilSec.Firewall")
 
@@ -60,6 +61,11 @@ class FirewallManager:
 
         self.active_backend = self._detect_backend()
         self._init_scripts()
+        # Initialize backend abstraction
+        if self.active_backend == "iptables":
+            self.backend = IptablesBackend(dry_run=self.dry_run, whitelist_nets=self.whitelist_networks)
+        else:
+            self.backend = DryRunBackend(dry_run=self.dry_run, whitelist_nets=self.whitelist_networks)
 
         # Step 1: Load existing active bans from storage and normalize to /24 subnets
         if self.storage:
@@ -88,7 +94,11 @@ class FirewallManager:
 
         # Step 1.5: If starting in LIVE mode, ensure dedicated chains and whitelist rules are active first
         if not self.dry_run:
-            self._ensure_whitelist_rules()
+            # Delegate to backend
+            try:
+                self.backend.ensure_whitelist_rules()
+            except Exception:
+                self._ensure_whitelist_rules()
 
         # Step 2: Sync with actual firewall state (restore bans that exist in firewall but not in memory)
         if not self.dry_run:
@@ -102,7 +112,11 @@ class FirewallManager:
                         continue
                     record.status = "BANNED"
                     record.backend = self.active_backend
-                    self._exec_ban_system(record)
+                    # Delegate to backend for actual system ban
+                    try:
+                        self.backend.exec_ban(record.ip)
+                    except Exception:
+                        self._exec_ban_system(record)
                     if self.storage:
                         self.storage.save_ban(record)
 
