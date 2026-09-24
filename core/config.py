@@ -60,6 +60,12 @@ class ConfigManager:
         else:
             self.log_files.append({"name": os.path.basename(self.log_file), "path": self.log_file})
 
+        # Emit a concise log of loaded log_files for debugging/visibility
+        try:
+            logging.getLogger("UtilSec.Config").info("Configured log_files: %s", self.log_files)
+        except Exception:
+            pass
+
         self.firewall_backend = self.raw_config.get("firewall_backend", "auto")
         self.dry_run = self.raw_config.get("dry_run", True)
         self.default_ban_duration = int(self.raw_config.get("default_ban_duration", 3600))

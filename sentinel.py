@@ -60,6 +60,8 @@ def main():
 
     # 2. Load configuration
     config = ConfigManager(config_path=args.config)
+    logging.getLogger("UtilSec").info("Loaded config: %s", args.config)
+    logging.getLogger("UtilSec").info("Configured log files: %s", config.log_files)
     if args.log:
         config.log_files = []
         for entry in args.log:
