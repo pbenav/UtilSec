@@ -1230,6 +1230,68 @@ class FirewallManager:
 
         return filtered
 
+    def scan_external_rules_debug(self) -> Tuple[List[FirewallRuleInfo], List[str]]:
+        """Scan external firewall rules and return (rules, diagnostics).
+
+        Diagnostics contains human-readable lines explaining any errors
+        or non-zero stderr returned by system utilities (iptables/ufw/nft/fail2ban).
+        """
+        diagnostics: List[str] = []
+        rules: List[FirewallRuleInfo] = []
+        # Try iptables
+        try:
+            r = self._scan_iptables_rules()
+            rules.extend(r)
+        except Exception as e:
+            diagnostics.append(f"iptables scan error: {e}")
+
+        # Try ufw
+        try:
+            r = self._scan_ufw_rules()
+            rules.extend([x for x in r if x.ip and x not in rules])
+        except Exception as e:
+            diagnostics.append(f"ufw scan error: {e}")
+
+        # Try nft
+        try:
+            r = self._scan_nft_rules()
+            rules.extend([x for x in r if x.ip and x not in rules])
+        except Exception as e:
+            diagnostics.append(f"nftables scan error: {e}")
+
+        # Try fail2ban explicitly with sudo hint
+        try:
+            # We attempt to run fail2ban-client and capture stderr if any
+            is_root = os.geteuid() == 0
+            prefix = [] if is_root else ["sudo", "-n"]
+            try:
+                p = subprocess.run(prefix + ["fail2ban-client", "status"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            except FileNotFoundError:
+                diagnostics.append("fail2ban-client: not installed")
+                p = None
+
+            if p is not None:
+                if p.returncode != 0:
+                    stderr = p.stderr.decode("utf-8", errors="replace").strip()
+                    diagnostics.append(f"fail2ban-client status failed: {stderr}")
+                else:
+                    # parse jails and include their bans via existing scanner
+                    fb = self._scan_fail2ban()
+                    rules.extend([x for x in fb if x.ip and x not in rules])
+        except Exception as e:
+            diagnostics.append(f"fail2ban scan error: {e}")
+
+        # Deduplicate by (ip, source, backend)
+        seen = set()
+        unique: List[FirewallRuleInfo] = []
+        for r in rules:
+            key = (r.ip, r.source, r.backend)
+            if key not in seen:
+                seen.add(key)
+                unique.append(r)
+
+        return unique, diagnostics
+
     def _scan_fail2ban(self) -> List[FirewallRuleInfo]:
         """Scan fail2ban jails using `fail2ban-client` and return banned IPs per jail."""
         rules: List[FirewallRuleInfo] = []

@@ -1251,8 +1251,8 @@ class SentinelTUI:
         prev_running = self.running
         prev_status = self.status_msg
 
-        # Get external firewall rules (fail2ban, manual)
-        fw_rules = self.firewall.get_firewall_rules()
+        # Get external firewall rules (fail2ban, manual) plus diagnostics
+        fw_rules, diagnostics = self.firewall.scan_external_rules_debug()
         selected_idx = 0
         scroll_offset = 0
 
@@ -1295,7 +1295,7 @@ class SentinelTUI:
             # Instructions
             instr_y = start_y + 4
             stdscr.addstr(instr_y, start_x + 2,
-                          "↑/↓ Navigate  Enter Unban  [Esc] Cancel  [F]ail2ban  [I]ptables",
+                          "↑/↓ Navigate  Enter Unban  [Esc] Cancel  [F]ail2ban  [I]ptables  [S]earch",
                           curses.color_pair(self.C_MUTED))
 
             # List rules with scroll
@@ -1337,6 +1337,12 @@ class SentinelTUI:
             if not fw_rules:
                 msg = "  No external firewall rules detected"
                 stdscr.addstr(list_start_y, start_x + 2, msg, curses.color_pair(self.C_MUTED))
+                # Show diagnostics lines below if any
+                dx = 0
+                for d in diagnostics[: (modal_h - 10) ]:
+                    if list_start_y + 2 + dx < start_y + modal_h - 2:
+                        stdscr.addstr(list_start_y + 2 + dx, start_x + 2, f"! {d}", curses.color_pair(self.C_WARN))
+                        dx += 1
 
             # Status hint
             hint_y = list_start_y + display_count + 1
@@ -1344,6 +1350,10 @@ class SentinelTUI:
                 stdscr.addstr(hint_y, start_x + 2,
                               f"Rules detected: {len(fw_rules)} (fail2ban/manual only)",
                               curses.color_pair(self.C_INFO))
+                # If there are diagnostics but rules exist, show a compact notice
+                if diagnostics:
+                    diag_msg = diagnostics[0][: (modal_w - 6)]
+                    stdscr.addstr(hint_y + 1, start_x + 2, f"! {diag_msg}", curses.color_pair(self.C_WARN))
 
             stdscr.refresh()
 
