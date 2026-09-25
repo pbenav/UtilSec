@@ -1128,11 +1128,18 @@ class SentinelTUI:
                         line = line[:modal_w - 4] + ".."
                     y = list_start_y + i
                     if 0 <= y < max_y - 1:
+                        # Use the same alignment for selected and unselected lines.
+                        # Previously the selected line was padded with extra spaces
+                        # which visually moved it to the right. Render the exact
+                        # line content and use attributes (reverse/bold) to highlight.
                         if list_idx == selected_idx:
-                            stdscr.addstr(y, start_x + 1, f" {line} ",
-                                          curses.color_pair(self.C_WARN) | curses.A_BOLD)
+                            attr = curses.A_REVERSE | curses.A_BOLD
+                            color = self.C_WARN
                         else:
-                            stdscr.addstr(y, start_x + 1, line, curses.color_pair(self.C_DEFAULT))
+                            attr = curses.A_NORMAL
+                            color = self.C_DEFAULT
+
+                        stdscr.addstr(y, start_x + 1, line, curses.color_pair(color) | attr)
 
             # Show scroll indicator
             if len(bans) > display_count:
