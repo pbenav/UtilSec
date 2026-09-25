@@ -1175,8 +1175,10 @@ class FirewallManager:
         
         This is used by the [U] panel to show rules that need manual attention.
         """
-        if self.dry_run:
-            return []
+        # Note: allow scanning of external firewall rules even when running in
+        # dry-run mode so operators can inspect fail2ban/manual rules without
+        # switching to LIVE mode. Scanners handle missing commands / permissions
+        # and will return an empty list if scanning is not possible.
 
         rules = []
         if self.active_backend == "iptables":
