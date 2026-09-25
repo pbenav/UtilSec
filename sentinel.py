@@ -11,6 +11,7 @@ import signal
 import sys
 import threading
 import time
+import fcntl
 
 from core.config import ConfigManager
 from core.detector import AttackDetector
@@ -54,6 +55,41 @@ def main():
     parser.add_argument("--mask", type=int, default=24, help="Subnet mask prefix (default: 24)")
 
     args = parser.parse_args()
+
+    # ==== Single-instance lock: ensure only one instance runs per machine ====
+    # Uses an exclusive non-blocking flock on a lock file in /tmp. If another
+    # process holds the lock, we notify and exit without modifying anything.
+    _lock_file_handle = None
+    def acquire_single_instance_lock(path: str = "/tmp/utilsec_sentinel.lock"):
+        nonlocal _lock_file_handle
+        try:
+            fh = open(path, "a+")
+        except Exception as e:
+            # If we cannot open the lock file, warn but allow startup (fallback)
+            print(f"Warning: could not open lock file {path}: {e}", file=sys.stderr)
+            return
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(
+                "Another instance of UtilSec Sentinel is already running on this machine. Exiting.",
+                file=sys.stderr,
+            )
+            try:
+                fh.close()
+            finally:
+                sys.exit(1)
+        except Exception as e:
+            # Unexpected flock error: warn and close, but allow startup
+            print(f"Warning: could not acquire lock on {path}: {e}", file=sys.stderr)
+            try:
+                fh.close()
+            finally:
+                return
+        # Keep file handle open for duration of process so lock is held
+        _lock_file_handle = fh
+
+    acquire_single_instance_lock()
 
     # 1. Setup storage first (needed for log config persistence)
     storage = StorageManager(db_path="sentinel_history.db")
