@@ -1235,7 +1235,9 @@ class FirewallManager:
         rules: List[FirewallRuleInfo] = []
         try:
             # Get list of jails
-            result = subprocess.run(["fail2ban-client", "status"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            is_root = os.geteuid() == 0
+            prefix = [] if is_root else ["sudo", "-n"]
+            result = subprocess.run(prefix + ["fail2ban-client", "status"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
             if result.returncode != 0:
                 return rules
             out = result.stdout.decode("utf-8", errors="replace")
@@ -1254,7 +1256,7 @@ class FirewallManager:
 
             for jail in jails:
                 try:
-                    r = subprocess.run(["fail2ban-client", "status", jail], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+                    r = subprocess.run(prefix + ["fail2ban-client", "status", jail], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
                     if r.returncode != 0:
                         continue
                     txt = r.stdout.decode("utf-8", errors="replace")
