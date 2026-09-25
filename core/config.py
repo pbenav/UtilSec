@@ -21,30 +21,58 @@ class ConfigManager:
 
     def load(self) -> None:
         """Loads configuration from JSON file or sets defaults."""
+        # 1) Try given path as-is
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     self.raw_config = json.load(f)
+                logging.getLogger("UtilSec.Config").info("Loaded configuration from %s", self.config_path)
             except Exception as e:
                 logging.getLogger("UtilSec.Config").warning(
                     "Error loading %s: %s. Using fallback defaults.", self.config_path, e
                 )
                 self.raw_config = {}
         else:
-            # If the requested config does not exist, try to load a shipped example
-            example_path = f"{self.config_path}.example"
-            if os.path.exists(example_path):
+            # 2) Try repo-relative path (useful when sentinel is started from another CWD)
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            alt_path = os.path.join(repo_root, self.config_path)
+            if os.path.exists(alt_path):
                 try:
-                    with open(example_path, "r", encoding="utf-8") as f:
+                    with open(alt_path, "r", encoding="utf-8") as f:
                         self.raw_config = json.load(f)
-                    logging.getLogger("UtilSec.Config").info("Loaded configuration from %s", example_path)
+                    logging.getLogger("UtilSec.Config").info("Loaded configuration from %s", alt_path)
                 except Exception as e:
                     logging.getLogger("UtilSec.Config").warning(
-                        "Error loading %s: %s. Using fallback defaults.", example_path, e
+                        "Error loading %s: %s. Using fallback defaults.", alt_path, e
                     )
                     self.raw_config = {}
             else:
-                self.raw_config = {}
+                # 3) Try trailing .example next to requested path or repo root
+                example_path = f"{self.config_path}.example"
+                if os.path.exists(example_path):
+                    try:
+                        with open(example_path, "r", encoding="utf-8") as f:
+                            self.raw_config = json.load(f)
+                        logging.getLogger("UtilSec.Config").info("Loaded configuration from %s", example_path)
+                    except Exception as e:
+                        logging.getLogger("UtilSec.Config").warning(
+                            "Error loading %s: %s. Using fallback defaults.", example_path, e
+                        )
+                        self.raw_config = {}
+                else:
+                    example_repo = os.path.join(repo_root, f"{self.config_path}.example")
+                    if os.path.exists(example_repo):
+                        try:
+                            with open(example_repo, "r", encoding="utf-8") as f:
+                                self.raw_config = json.load(f)
+                            logging.getLogger("UtilSec.Config").info("Loaded configuration from %s", example_repo)
+                        except Exception as e:
+                            logging.getLogger("UtilSec.Config").warning(
+                                "Error loading %s: %s. Using fallback defaults.", example_repo, e
+                            )
+                            self.raw_config = {}
+                    else:
+                        self.raw_config = {}
 
         # Set default values if missing
         self.log_file = self.raw_config.get("log_file", "logs")
