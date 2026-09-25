@@ -1204,6 +1204,16 @@ class FirewallManager:
                         if key not in r_ips:
                             r_ips.append(key)
                             rules.append(pr)
+                # Also probe fail2ban via fail2ban-client to get accurate banned IP lists
+                try:
+                    part = self._scan_fail2ban()
+                except Exception:
+                    part = []
+                for pr in part:
+                    key = (pr.ip, pr.source, pr.backend, pr.rule_num)
+                    if key not in r_ips:
+                        r_ips.append(key)
+                        rules.append(pr)
             except Exception:
                 # fallback to empty list on unexpected errors
                 rules = []
@@ -1219,6 +1229,65 @@ class FirewallManager:
                 filtered.append(rule)
 
         return filtered
+
+    def _scan_fail2ban(self) -> List[FirewallRuleInfo]:
+        """Scan fail2ban jails using `fail2ban-client` and return banned IPs per jail."""
+        rules: List[FirewallRuleInfo] = []
+        try:
+            # Get list of jails
+            result = subprocess.run(["fail2ban-client", "status"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            if result.returncode != 0:
+                return rules
+            out = result.stdout.decode("utf-8", errors="replace")
+            jails = []
+            for line in out.splitlines():
+                if "Jail list" in line or line.strip().startswith("Jails"):
+                    if ":" in line:
+                        part = line.split(":", 1)[1]
+                        for tok in (t.strip() for t in part.split(",")):
+                            if tok:
+                                jails.append(tok)
+                    else:
+                        parts = line.split()
+                        jails.extend(parts[1:])
+                    break
+
+            for jail in jails:
+                try:
+                    r = subprocess.run(["fail2ban-client", "status", jail], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+                    if r.returncode != 0:
+                        continue
+                    txt = r.stdout.decode("utf-8", errors="replace")
+                    for l in txt.splitlines():
+                        if "Banned IP list" in l:
+                            if ":" in l:
+                                ips_part = l.split(":", 1)[1].strip()
+                                if not ips_part:
+                                    break
+                                for iptok in ips_part.split():
+                                    iptok = iptok.strip()
+                                    try:
+                                        ipaddress.ip_address(iptok)
+                                        rules.append(FirewallRuleInfo(
+                                            ip=iptok,
+                                            source="fail2ban",
+                                            reason=f"Fail2ban jail: {jail}",
+                                            rule_num=0,
+                                            backend="fail2ban",
+                                            jail_name=jail,
+                                        ))
+                                    except Exception:
+                                        continue
+                            break
+                except FileNotFoundError:
+                    return rules
+                except Exception:
+                    continue
+        except FileNotFoundError:
+            return rules
+        except Exception:
+            return rules
+        return rules
 
     def find_rules_for(self, target: str) -> List[FirewallRuleInfo]:
         """Return firewall rules that match or overlap the `target` IP or network."""
