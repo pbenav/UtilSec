@@ -1417,6 +1417,16 @@ class SentinelTUI:
                         self.status_msg = f"Failed to remove rule for {rule.ip}"
                     # Refresh
                     fw_rules = self.firewall.get_firewall_rules()
+                elif ch in (ord("s"), ord("S")):
+                    # Search & unban by IP or subnet (operator input)
+                    inp = self._prompt_input(stdscr, "Enter IP or Subnet to search/unban (e.g. 1.2.3.4 or 1.2.3.0/24): ")
+                    if inp:
+                        ok = self.firewall.unban_anywhere(inp.strip())
+                        if ok:
+                            self.status_msg = f"Attempted removal of rules matching: {inp.strip()}"
+                        else:
+                            self.status_msg = f"No matching external rules found for: {inp.strip()}"
+                        fw_rules = self.firewall.get_firewall_rules()
 
         # Restore state
         self.status_msg = prev_status

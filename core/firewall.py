@@ -1198,6 +1198,70 @@ class FirewallManager:
 
         return filtered
 
+    def find_rules_for(self, target: str) -> List[FirewallRuleInfo]:
+        """Return firewall rules that match or overlap the `target` IP or network."""
+        try:
+            # Normalize target to ip or network
+            if "/" in target:
+                tgt_net = ipaddress.ip_network(target.strip(), strict=False)
+                is_net = True
+            else:
+                tgt_addr = ipaddress.ip_address(target.strip())
+                is_net = False
+        except Exception:
+            return []
+
+        rules = self.get_firewall_rules()
+        matches: List[FirewallRuleInfo] = []
+        for r in rules:
+            try:
+                if "/" in r.ip:
+                    r_net = ipaddress.ip_network(r.ip, strict=False)
+                    if is_net:
+                        if r_net.overlaps(tgt_net):
+                            matches.append(r)
+                    else:
+                        if tgt_addr in r_net:
+                            matches.append(r)
+                else:
+                    r_addr = ipaddress.ip_address(r.ip)
+                    if is_net:
+                        if r_addr in tgt_net:
+                            matches.append(r)
+                    else:
+                        if r_addr == tgt_addr:
+                            matches.append(r)
+            except Exception:
+                continue
+        return matches
+
+    def unban_anywhere(self, target: str) -> bool:
+        """Attempt to remove any firewall rules (fail2ban/manual/utilsec) that block `target`.
+
+        Returns True if at least one removal succeeded.
+        """
+        matches = self.find_rules_for(target)
+        if not matches:
+            logger.info("No external firewall rules matched %s", target)
+            return False
+
+        any_success = False
+        for rule in matches:
+            try:
+                if rule.source == "fail2ban":
+                    ok = self.unban_fail2ban(rule.ip, rule.jail_name)
+                elif rule.source == "manual":
+                    ok = self.unban_manual_rule(rule.ip, rule.rule_num, rule.backend)
+                elif rule.source == "utilsec":
+                    ok = self.unban_ip(rule.ip, manual=True)
+                else:
+                    ok = False
+                any_success = any_success or bool(ok)
+            except Exception as e:
+                logger.debug("Error removing rule for %s: %s", rule.ip, e)
+
+        return any_success
+
     def toggle_dry_run(self) -> Tuple[bool, str]:
         """Toggle between dry-run and live system firewall mode.
         Returns: (is_dry_run, message_description)
