@@ -1181,12 +1181,32 @@ class FirewallManager:
         # and will return an empty list if scanning is not possible.
 
         rules = []
+        # If we have a specific active backend, prefer it. If running in
+        # dry-run, attempt to probe all supported backends so external rules
+        # (fail2ban/manual) can still be discovered for operator visibility.
         if self.active_backend == "iptables":
             rules = self._scan_iptables_rules()
         elif self.active_backend == "ufw":
             rules = self._scan_ufw_rules()
         elif self.active_backend == "nft":
             rules = self._scan_nft_rules()
+        else:
+            # dry-run or unknown: try all scanners and merge unique rules
+            try:
+                r_ips = []
+                for scanner in (self._scan_iptables_rules, self._scan_ufw_rules, self._scan_nft_rules):
+                    try:
+                        part = scanner()
+                    except Exception:
+                        part = []
+                    for pr in part:
+                        key = (pr.ip, pr.source, pr.backend, pr.rule_num)
+                        if key not in r_ips:
+                            r_ips.append(key)
+                            rules.append(pr)
+            except Exception:
+                # fallback to empty list on unexpected errors
+                rules = []
 
         # Filter out rules that are already in active_bans (UtilSec bans)
         with self.lock:
