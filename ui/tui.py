@@ -1184,7 +1184,7 @@ class SentinelTUI:
                 selected_idx = 0
             elif ch == curses.KEY_END:
                 selected_idx = len(bans) - 1
-            elif ch in (10, 13, 27 - 64, curses.KEY_ENTER):
+            elif ch in (10, 13, curses.KEY_ENTER):
                 # Enter — unban selected IP
                 if bans:
                     target_ip = bans[selected_idx].ip
@@ -1389,7 +1389,7 @@ class SentinelTUI:
                 selected_idx = 0
             elif ch == curses.KEY_END:
                 selected_idx = len(fw_rules) - 1
-            elif ch in (10, 13, 27 - 64, curses.KEY_ENTER):
+            elif ch in (10, 13, curses.KEY_ENTER):
                 # Enter — unban selected rule
                 if fw_rules:
                     rule = fw_rules[selected_idx]
