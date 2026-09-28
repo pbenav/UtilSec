@@ -286,7 +286,12 @@ class SentinelTUI:
 
             # Left Header: Banned IPs
             stdscr.addstr(4, 2, " BANNED SUBNETS / ATTACKERS ", curses.color_pair(self.C_ALERT) | curses.A_BOLD)
-            tbl_hdr = f"  {'TARGET/SUBNET':<18} {'REASON/RULE':<22} {'HITS':<5} {'TTL':<8} {'STATUS':<8}"
+            
+            # Dynamic widths
+            reason_w = max(22, split_x - 46)
+            ip_w = max(18, min(24, split_x // 5))  # Give IP a bit more space if wide
+            
+            tbl_hdr = f"  {'TARGET/SUBNET':<{ip_w}} {'REASON/RULE':<{reason_w}} {'HITS':<5} {'TTL':<8} {'STATUS':<8}"
             stdscr.addstr(5, 1, tbl_hdr[: split_x - 1], curses.color_pair(self.C_DEFAULT) | curses.A_UNDERLINE)
 
             # Draw Banned IPs Table
@@ -310,10 +315,14 @@ class SentinelTUI:
                     is_sel = abs_i == self.selected_idx
 
                     rem = f"{ban.remaining_seconds}s" if ban.ban_duration > 0 else "PERM"
-                    rule_disp = ban.reason[:22]
-                    if len(ban.reason) > 22:
-                        rule_disp += ".."
-                    line_str = f" {ban.ip:<18} {rule_disp:<22} {ban.attack_count:<5} {rem:<8} {ban.status:<8}"
+                    reason_w = max(22, split_x - 46)
+                    ip_w = max(18, min(24, split_x // 5))
+                    
+                    rule_disp = ban.reason
+                    if len(rule_disp) > reason_w:
+                        rule_disp = rule_disp[:reason_w-2] + ".."
+                    
+                    line_str = f" {ban.ip:<{ip_w}} {rule_disp:<{reason_w}} {ban.attack_count:<5} {rem:<8} {ban.status:<8}"
                     line_str = line_str[: split_x - 1].ljust(split_x - 1)
 
                     attr = curses.A_REVERSE if is_sel else curses.A_NORMAL
