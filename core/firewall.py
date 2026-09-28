@@ -1,4 +1,5 @@
 import ipaddress
+from core.utils import is_valid_ip, normalize_ip
 import logging
 import os
 import shutil
@@ -10,6 +11,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from core.models import BanRecord
 from core.storage import StorageManager
+from core.backends import DryRunBackend, IptablesBackend
 
 logger = logging.getLogger("UtilSec.Firewall")
 
@@ -59,6 +61,11 @@ class FirewallManager:
 
         self.active_backend = self._detect_backend()
         self._init_scripts()
+        # Initialize backend abstraction
+        if self.active_backend == "iptables":
+            self.backend = IptablesBackend(dry_run=self.dry_run, whitelist_nets=self.whitelist_networks)
+        else:
+            self.backend = DryRunBackend(dry_run=self.dry_run, whitelist_nets=self.whitelist_networks)
 
         # Step 1: Load existing active bans from storage and normalize to /24 subnets
         if self.storage:
@@ -87,7 +94,11 @@ class FirewallManager:
 
         # Step 1.5: If starting in LIVE mode, ensure dedicated chains and whitelist rules are active first
         if not self.dry_run:
-            self._ensure_whitelist_rules()
+            # Delegate to backend
+            try:
+                self.backend.ensure_whitelist_rules()
+            except Exception:
+                self._ensure_whitelist_rules()
 
         # Step 2: Sync with actual firewall state (restore bans that exist in firewall but not in memory)
         if not self.dry_run:
@@ -101,7 +112,11 @@ class FirewallManager:
                         continue
                     record.status = "BANNED"
                     record.backend = self.active_backend
-                    self._exec_ban_system(record)
+                    # Delegate to backend for actual system ban
+                    try:
+                        self.backend.exec_ban(record.ip)
+                    except Exception:
+                        self._exec_ban_system(record)
                     if self.storage:
                         self.storage.save_ban(record)
 
@@ -240,8 +255,18 @@ class FirewallManager:
     def is_ip_whitelisted(self, ip_str: str, config=None) -> bool:
         """Checks if an IP or subnet belongs to or overlaps with any whitelisted network."""
         ip_str = ip_str.strip()
+        # Normalize common forms (strip ports / brackets)
+        try:
+            n = normalize_ip(ip_str)
+            if n:
+                ip_str = n
+        except Exception:
+            pass
         whitelist = self._get_whitelist_networks(config)
         if not whitelist:
+            return False
+        # Reject invalid IPs early (after normalization)
+        if not is_valid_ip(ip_str) and "/" not in ip_str:
             return False
         try:
             if "/" in ip_str:
@@ -1150,16 +1175,48 @@ class FirewallManager:
         
         This is used by the [U] panel to show rules that need manual attention.
         """
-        if self.dry_run:
-            return []
+        # Note: allow scanning of external firewall rules even when running in
+        # dry-run mode so operators can inspect fail2ban/manual rules without
+        # switching to LIVE mode. Scanners handle missing commands / permissions
+        # and will return an empty list if scanning is not possible.
 
         rules = []
+        # If we have a specific active backend, prefer it. If running in
+        # dry-run, attempt to probe all supported backends so external rules
+        # (fail2ban/manual) can still be discovered for operator visibility.
         if self.active_backend == "iptables":
             rules = self._scan_iptables_rules()
         elif self.active_backend == "ufw":
             rules = self._scan_ufw_rules()
         elif self.active_backend == "nft":
             rules = self._scan_nft_rules()
+        else:
+            # dry-run or unknown: try all scanners and merge unique rules
+            try:
+                r_ips = []
+                for scanner in (self._scan_iptables_rules, self._scan_ufw_rules, self._scan_nft_rules):
+                    try:
+                        part = scanner()
+                    except Exception:
+                        part = []
+                    for pr in part:
+                        key = (pr.ip, pr.source, pr.backend, pr.rule_num)
+                        if key not in r_ips:
+                            r_ips.append(key)
+                            rules.append(pr)
+                # Also probe fail2ban via fail2ban-client to get accurate banned IP lists
+                try:
+                    part = self._scan_fail2ban()
+                except Exception:
+                    part = []
+                for pr in part:
+                    key = (pr.ip, pr.source, pr.backend, pr.rule_num)
+                    if key not in r_ips:
+                        r_ips.append(key)
+                        rules.append(pr)
+            except Exception:
+                # fallback to empty list on unexpected errors
+                rules = []
 
         # Filter out rules that are already in active_bans (UtilSec bans)
         with self.lock:
@@ -1172,6 +1229,193 @@ class FirewallManager:
                 filtered.append(rule)
 
         return filtered
+
+    def scan_external_rules_debug(self) -> Tuple[List[FirewallRuleInfo], List[str]]:
+        """Scan external firewall rules and return (rules, diagnostics).
+
+        Diagnostics contains human-readable lines explaining any errors
+        or non-zero stderr returned by system utilities (iptables/ufw/nft/fail2ban).
+        """
+        diagnostics: List[str] = []
+        rules: List[FirewallRuleInfo] = []
+        # Try iptables
+        try:
+            r = self._scan_iptables_rules()
+            rules.extend(r)
+        except Exception as e:
+            diagnostics.append(f"iptables scan error: {e}")
+
+        # Try ufw
+        try:
+            r = self._scan_ufw_rules()
+            rules.extend([x for x in r if x.ip and x not in rules])
+        except Exception as e:
+            diagnostics.append(f"ufw scan error: {e}")
+
+        # Try nft
+        try:
+            r = self._scan_nft_rules()
+            rules.extend([x for x in r if x.ip and x not in rules])
+        except Exception as e:
+            diagnostics.append(f"nftables scan error: {e}")
+
+        # Try fail2ban explicitly with sudo hint
+        try:
+            # We attempt to run fail2ban-client and capture stderr if any
+            is_root = os.geteuid() == 0
+            prefix = [] if is_root else ["sudo", "-n"]
+            try:
+                p = subprocess.run(prefix + ["fail2ban-client", "status"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            except FileNotFoundError:
+                diagnostics.append("fail2ban-client: not installed")
+                p = None
+
+            if p is not None:
+                if p.returncode != 0:
+                    stderr = p.stderr.decode("utf-8", errors="replace").strip()
+                    diagnostics.append(f"fail2ban-client status failed: {stderr}")
+                else:
+                    # parse jails and include their bans via existing scanner
+                    fb = self._scan_fail2ban()
+                    rules.extend([x for x in fb if x.ip and x not in rules])
+        except Exception as e:
+            diagnostics.append(f"fail2ban scan error: {e}")
+
+        # Deduplicate by (ip, source, backend)
+        seen = set()
+        unique: List[FirewallRuleInfo] = []
+        for r in rules:
+            key = (r.ip, r.source, r.backend)
+            if key not in seen:
+                seen.add(key)
+                unique.append(r)
+
+        return unique, diagnostics
+
+    def _scan_fail2ban(self) -> List[FirewallRuleInfo]:
+        """Scan fail2ban jails using `fail2ban-client` and return banned IPs per jail."""
+        rules: List[FirewallRuleInfo] = []
+        try:
+            # Get list of jails
+            is_root = os.geteuid() == 0
+            prefix = [] if is_root else ["sudo", "-n"]
+            result = subprocess.run(prefix + ["fail2ban-client", "status"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            if result.returncode != 0:
+                return rules
+            out = result.stdout.decode("utf-8", errors="replace")
+            jails = []
+            for line in out.splitlines():
+                if "Jail list" in line or line.strip().startswith("Jails"):
+                    if ":" in line:
+                        part = line.split(":", 1)[1]
+                        for tok in (t.strip() for t in part.split(",")):
+                            if tok:
+                                jails.append(tok)
+                    else:
+                        parts = line.split()
+                        jails.extend(parts[1:])
+                    break
+
+            for jail in jails:
+                try:
+                    r = subprocess.run(prefix + ["fail2ban-client", "status", jail], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+                    if r.returncode != 0:
+                        continue
+                    txt = r.stdout.decode("utf-8", errors="replace")
+                    for l in txt.splitlines():
+                        if "Banned IP list" in l:
+                            if ":" in l:
+                                ips_part = l.split(":", 1)[1].strip()
+                                if not ips_part:
+                                    break
+                                for iptok in ips_part.split():
+                                    iptok = iptok.strip()
+                                    try:
+                                        ipaddress.ip_address(iptok)
+                                        rules.append(FirewallRuleInfo(
+                                            ip=iptok,
+                                            source="fail2ban",
+                                            reason=f"Fail2ban jail: {jail}",
+                                            rule_num=0,
+                                            backend="fail2ban",
+                                            jail_name=jail,
+                                        ))
+                                    except Exception:
+                                        continue
+                            break
+                except FileNotFoundError:
+                    return rules
+                except Exception:
+                    continue
+        except FileNotFoundError:
+            return rules
+        except Exception:
+            return rules
+        return rules
+
+    def find_rules_for(self, target: str) -> List[FirewallRuleInfo]:
+        """Return firewall rules that match or overlap the `target` IP or network."""
+        try:
+            # Normalize target to ip or network
+            if "/" in target:
+                tgt_net = ipaddress.ip_network(target.strip(), strict=False)
+                is_net = True
+            else:
+                tgt_addr = ipaddress.ip_address(target.strip())
+                is_net = False
+        except Exception:
+            return []
+
+        rules = self.get_firewall_rules()
+        matches: List[FirewallRuleInfo] = []
+        for r in rules:
+            try:
+                if "/" in r.ip:
+                    r_net = ipaddress.ip_network(r.ip, strict=False)
+                    if is_net:
+                        if r_net.overlaps(tgt_net):
+                            matches.append(r)
+                    else:
+                        if tgt_addr in r_net:
+                            matches.append(r)
+                else:
+                    r_addr = ipaddress.ip_address(r.ip)
+                    if is_net:
+                        if r_addr in tgt_net:
+                            matches.append(r)
+                    else:
+                        if r_addr == tgt_addr:
+                            matches.append(r)
+            except Exception:
+                continue
+        return matches
+
+    def unban_anywhere(self, target: str) -> bool:
+        """Attempt to remove any firewall rules (fail2ban/manual/utilsec) that block `target`.
+
+        Returns True if at least one removal succeeded.
+        """
+        matches = self.find_rules_for(target)
+        if not matches:
+            logger.info("No external firewall rules matched %s", target)
+            return False
+
+        any_success = False
+        for rule in matches:
+            try:
+                if rule.source == "fail2ban":
+                    ok = self.unban_fail2ban(rule.ip, rule.jail_name)
+                elif rule.source == "manual":
+                    ok = self.unban_manual_rule(rule.ip, rule.rule_num, rule.backend)
+                elif rule.source == "utilsec":
+                    ok = self.unban_ip(rule.ip, manual=True)
+                else:
+                    ok = False
+                any_success = any_success or bool(ok)
+            except Exception as e:
+                logger.debug("Error removing rule for %s: %s", rule.ip, e)
+
+        return any_success
 
     def toggle_dry_run(self) -> Tuple[bool, str]:
         """Toggle between dry-run and live system firewall mode.
