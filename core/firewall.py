@@ -1284,7 +1284,13 @@ class FirewallManager:
         # Deduplicate by (ip, source, backend)
         seen = set()
         unique: List[FirewallRuleInfo] = []
+        
+        with self.lock:
+            active_ips = set(self.active_bans.keys())
+
         for r in rules:
+            if r.source == "utilsec" or r.ip in active_ips:
+                continue
             key = (r.ip, r.source, r.backend)
             if key not in seen:
                 seen.add(key)
