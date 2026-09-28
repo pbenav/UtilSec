@@ -1190,7 +1190,10 @@ class SentinelTUI:
                     target_ip = bans[selected_idx].ip
                     self.firewall.unban_ip(target_ip, manual=True)
                     self.status_msg = f"Unbanned: {target_ip}"
-                    break
+                    bans = self.firewall.get_active_bans_list()
+                    if selected_idx >= len(bans):
+                        selected_idx = max(0, len(bans) - 1)
+                    continue
             elif ch in (ord("m"), ord("M")):
                 # Manual input mode
                 stdscr.nodelay(False)
