@@ -8,6 +8,13 @@ from typing import Deque, Dict, List, Optional, Tuple
 from core.config import ConfigManager
 from core.models import AttackEvent, Rule
 
+# Rate-limit bookkeeping is bounded on purpose: a scanner rotating through
+# millions of source addresses would otherwise grow these dicts without limit.
+# Entries used to be pruned only when the very same IP came back, so every
+# single-hit probe left a permanent dict entry behind.
+HISTORY_SWEEP_INTERVAL = 30.0
+HISTORY_MAX_TRACKED_IPS = 100_000
+
 
 class AttackDetector:
     """Detects malicious requests using string patterns, regex heuristics, and rate limiting."""
@@ -24,6 +31,26 @@ class AttackDetector:
         self.total_404s = 0
         self.total_403s = 0
         self.total_attacks_detected = 0
+        self._last_history_sweep = time.time()
+
+    def _sweep_histories(self, now: float) -> None:
+        """Evict rate-limit entries whose window aged out, then enforce a cap.
+
+        Must be called from the request path only once every
+        ``HISTORY_SWEEP_INTERVAL`` seconds: it is O(tracked IPs).
+        """
+        self._last_history_sweep = now
+        cutoff = now - self.config.window_seconds
+        for store in (self.ip_403_history, self.ip_404_history):
+            for stale_ip in [ip for ip, hits in store.items() if not hits or hits[-1] < cutoff]:
+                del store[stale_ip]
+
+            excess = len(store) - HISTORY_MAX_TRACKED_IPS
+            if excess <= 0:
+                continue
+            # Least recently active IPs first.
+            for stale_ip, _ in sorted(store.items(), key=lambda kv: kv[1][-1])[:excess]:
+                del store[stale_ip]
 
     def _compile_rules(self) -> None:
         """Compile regex rules for ultra-fast matching."""
@@ -70,6 +97,8 @@ class AttackDetector:
             return None, False, ""
 
         now = time.time()
+        if now - self._last_history_sweep >= HISTORY_SWEEP_INTERVAL:
+            self._sweep_histories(now)
 
         # 1. Match against configured rules and AI heuristics
         for rule, comp_regex in self.compiled_rules:

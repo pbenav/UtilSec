@@ -29,10 +29,20 @@ def setup_logger(log_file: str = "sentinel.log") -> logging.Logger:
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setFormatter(formatter)
     logger.addHandler(fh)
+    # Logs must not be world-writable: a local user could otherwise forge
+    # log lines and drive the ban engine.
+    try:
+        os.chmod(log_file, 0o640)
+    except OSError:
+        pass
     return logger
 
 
 def main():
+    # Deterministic, conservative file modes for everything the process creates
+    # (DB, audit scripts, logs) regardless of the caller's umask.
+    os.umask(0o022)
+
     parser = argparse.ArgumentParser(
         description="UtilSec Sentinel: Real-Time Web Server Attack Monitor & Firewall Auto-Ban"
     )
@@ -123,6 +133,12 @@ def main():
     if not dry_run:
         whitelist_count = firewall._ensure_whitelist_rules(config.whitelist_networks)
         logger.info("Whitelist protection: %d ACCEPT rules ensured at top of INPUT chain", whitelist_count)
+    elif os.geteuid() == 0:
+        # Running the TUI as root without touching the firewall only widens the
+        # attack surface: the interface accepts free-form text input.
+        print("[!] Aviso: ejecutando como root en modo SIMULACIÓN (dry-run).")
+        print("[!] Considera relanzar sin sudo; el modo --live es el único que necesita root.")
+        logger.warning("Running in dry-run mode as root: unnecessary privilege.")
 
     # 4. Setup Attack Detector
     detector = AttackDetector(config=config)
@@ -149,15 +165,19 @@ def main():
 
                 if should_ban or already_banned:
                     target = config.get_ban_target(ip)
-                    firewall.ban_ip(
-                        ip=target,
-                        reason=ban_reason if should_ban else f"Burst Attack while Banned: {event.matched_rule}",
-                        matched_pattern=event.matched_rule,
-                        duration=config.default_ban_duration,
-                        last_url=url,
-                        config=config,
-                    )
-                    firewall.kill_active_connections(ip)
+                    if not target:
+                        logger.debug("Skipping ban: unparsable source IP %r", ip)
+                    else:
+                        firewall.ban_ip(
+                            ip=target,
+                            reason=ban_reason if should_ban else f"Burst Attack while Banned: {event.matched_rule}",
+                            matched_pattern=event.matched_rule,
+                            duration=config.default_ban_duration,
+                            last_url=url,
+                            config=config,
+                        )
+                        # No explicit kill here: FirewallManager already closes the
+                        # sockets (rate-limited) when the rule is applied.
         except Exception as e:
             logger.error(f"Error processing request ({ip}, {method}, {url}): {e}")
 
@@ -211,6 +231,11 @@ def main():
         firewall.stop()
         if tui_ref[0]:
             tui_ref[0].running = False
+        # Flush buffered events before leaving
+        try:
+            storage.close()
+        except Exception:
+            pass
 
         # Clear terminal screen cleanly and reset scrollback
         sys.stdout.write("\033[H\033[2J\033[3J")

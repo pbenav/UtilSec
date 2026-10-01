@@ -3,9 +3,32 @@
 import ipaddress
 import json
 import os
-from typing import Any, Dict, List, Set, Union
+import tempfile
+from typing import Any, Dict, List, Optional, Set, Union
 
 from core.models import Rule
+
+
+def parse_ip_or_network(value: Any) -> Optional[str]:
+    """Validate and normalize an IP address or CIDR network.
+
+    Returns the canonical string form, or ``None`` when the input is not a
+    well-formed IPv4/IPv6 address or network. This is the single choke point
+    used before anything reaches the firewall or the generated audit scripts,
+    so arbitrary text (``1.2.3.4; rm -rf /``) can never travel further.
+    """
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or any(ch.isspace() for ch in value):
+        return None
+    # ipaddress rejects shell metacharacters, quotes, $, backticks, etc.
+    try:
+        if "/" in value:
+            return str(ipaddress.ip_network(value, strict=False))
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return None
 
 
 class ConfigManager:
@@ -126,21 +149,29 @@ class ConfigManager:
         """
         Calculates the ban target. If ban_subnet is True, returns the subnet
         (e.g. /24 for IPv4, /64 for IPv6) to eliminate the entire subnet.
+
+        Returns an empty string when the input is not a valid IP/network, so
+        callers can refuse the ban instead of forwarding untrusted text.
         """
-        ip_str = ip_str.strip()
+        normalized = parse_ip_or_network(ip_str)
+        if normalized is None:
+            return ""
         if not self.ban_subnet:
-            return ip_str
+            return normalized
         try:
-            ip = ipaddress.ip_address(ip_str)
-            cidr = self.subnet_cidr_ipv4 if ip.version == 4 else self.subnet_cidr_ipv6
-            net = ipaddress.ip_network(f"{ip}/{cidr}", strict=False)
+            if "/" in normalized:
+                net = ipaddress.ip_network(normalized, strict=False)
+            else:
+                ip = ipaddress.ip_address(normalized)
+                cidr = self.subnet_cidr_ipv4 if ip.version == 4 else self.subnet_cidr_ipv6
+                net = ipaddress.ip_network(f"{ip}/{cidr}", strict=False)
             # Whitelist protection: if subnet overlaps with any whitelisted network, fallback to single IP
             for wnet in self.whitelist_networks:
                 if net.overlaps(wnet):
-                    return ip_str
+                    return normalized
             return str(net)
         except ValueError:
-            return ip_str
+            return normalized
 
     def add_user_pattern(self, pattern: str) -> bool:
         """Add a custom attack string dynamically and persist to config."""
@@ -195,10 +226,46 @@ class ConfigManager:
         return False
 
     def save(self) -> None:
-        """Save current configuration back to disk."""
+        """Atomically save the configuration to disk.
+
+        The file used to be truncated in place, so a crash or power loss in the
+        middle of the write left a corrupt config.json. The next start then
+        silently fell back to defaults - losing the whitelist, which is exactly
+        what stops the server from banning itself.
+        """
+        directory = os.path.dirname(os.path.abspath(self.config_path)) or "."
+        tmp_path = None
         try:
-            with open(self.config_path, "w", encoding="utf-8") as f:
+            mode = 0o644
+            try:
+                mode = os.stat(self.config_path).st_mode & 0o777
+            except OSError:
+                pass
+
+            fd, tmp_path = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=directory)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(self.raw_config, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp_path, mode)
+            os.replace(tmp_path, self.config_path)
+            tmp_path = None
+
+            # Persist the rename itself, not just the file contents.
+            try:
+                dir_fd = os.open(directory, os.O_DIRECTORY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
         except Exception as e:
             print(f"[!] Could not save configuration: {e}")
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 

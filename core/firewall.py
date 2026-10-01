@@ -1,17 +1,61 @@
 import ipaddress
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import threading
 import time
 from datetime import datetime
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from core.config import parse_ip_or_network
 from core.models import BanRecord
 from core.storage import StorageManager
 
 logger = logging.getLogger("UtilSec.Firewall")
+
+# Prefix length used to bucket banned networks for O(1)-ish lookups on the
+# hot path (one bucket per /16 for IPv4, per /64 for IPv6).
+_BUCKET_SHIFT = {4: 16, 6: 64}
+# A network spanning more buckets than this goes to the always-scanned list
+# instead of exploding the index (e.g. an 0.0.0.0/0 rule).
+_MAX_BUCKETS_PER_NET = 512
+
+# Source values iptables/ufw print for "no source restriction".
+_UNRESTRICTED_SOURCES = ("0.0.0.0/0", "0.0.0.0", "::/0", "::", "anywhere")
+
+# UtilSec owns this nftables table outright (never the distro's "inet filter"),
+# so the hook chain can be rebuilt without touching foreign rules.
+NFT_TABLE = "utilsec"
+NFT_SETS = {4: "utilsec_bans4", 6: "utilsec_bans6"}
+
+
+def _nft_set_for(target: str) -> str:
+    """Name of the address-family specific set a target belongs to."""
+    return NFT_SETS[6] if ":" in target else NFT_SETS[4]
+
+
+
+def _ban_key_variants(key: str) -> Tuple[str, ...]:
+    """Every plausible spelling of the same ban target.
+
+    iptables prints a host rule as ``1.2.3.4/32`` while the bans table may key
+    the same ban as ``1.2.3.4``, and a stored ``1.2.3.4`` ban becomes the rule
+    ``1.2.3.0/24`` once subnet banning is on. Comparing normalized variants is
+    the only reliable way to reconcile a firewall scan with the database.
+    """
+    if not key:
+        return ()
+    variants = {key}
+    try:
+        net = ipaddress.ip_network(key, strict=False)
+    except ValueError:
+        return (key,)
+    variants.add(str(net))
+    if net.prefixlen == net.max_prefixlen:
+        variants.add(str(net.network_address))
+    return tuple(variants)
 
 
 class FirewallRuleInfo:
@@ -39,6 +83,7 @@ class FirewallManager:
         subnet_cidr: int = 24,
         config=None,
         whitelist_networks: Optional[List] = None,
+        audit_dir: Optional[str] = None,
     ):
         self.requested_backend = backend
         self.dry_run = dry_run
@@ -53,6 +98,30 @@ class FirewallManager:
         elif config and hasattr(config, "whitelist_networks"):
             self.whitelist_networks = list(config.whitelist_networks)
 
+        # Directory holding the generated audit scripts (banned_ips.sh / unban_ips.sh).
+        # Tests override it via UTILSEC_AUDIT_DIR so they never pollute the repo.
+        self.audit_dir = audit_dir or os.environ.get("UTILSEC_AUDIT_DIR") or "."
+        self._audit_lock = threading.Lock()
+        self._audit_seen: Dict[str, set] = {}
+
+        # Debounce for connection killing: an attacker flooding the log must not
+        # trigger a fork/exec storm (ss + conntrack per line).
+        self.kill_cooldown = 5.0
+        self._kill_times: Dict[str, float] = {}
+        self._kill_times_lock = threading.Lock()
+
+        # nftables infrastructure (table/sets/hook chain) is created once.
+        self._nft_infra_ready = False
+
+        # Lookup cache for is_ip_banned(): networks are parsed once per change
+        # instead of on every single log line.
+        self._banned_buckets: Dict[Tuple[int, int], List[Tuple[Any, str]]] = {}
+        self._banned_overflow: List[Tuple[Any, str]] = []
+        self._banned_nets_len: int = -1
+        # Parsed networks are memoized so a rebuild only pays ipaddress parsing
+        # for genuinely new targets (rebuilds happen under self.lock).
+        self._parsed_by_key: Dict[str, Any] = {}
+
         self.lock = threading.Lock()
         self.active_bans: Dict[str, BanRecord] = {}
         self.running = True
@@ -66,6 +135,13 @@ class FirewallManager:
             now = time.time()
             with self.lock:
                 for orig_ip, record in loaded.items():
+                    # Never load unvalidated text coming from the DB: it ends up in
+                    # iptables command lines and in the generated audit scripts.
+                    if parse_ip_or_network(orig_ip) is None:
+                        logger.warning("Stored ban %r is not a valid IP/network! Purging from DB.", orig_ip)
+                        self.storage.update_ban_status(orig_ip, "INVALID")
+                        continue
+
                     # Whitelist check: if stored ban overlaps current whitelist, mark as WHITELISTED and skip
                     if self.is_ip_whitelisted(orig_ip):
                         logger.warning("Stored ban %s is whitelisted! Marking as WHITELISTED in DB.", orig_ip)
@@ -80,10 +156,17 @@ class FirewallManager:
                     record.ip = target
                     # If already expired while app was offline, mark as EXPIRED
                     if record.ban_duration > 0 and now >= record.unban_at:
-                        self.storage.update_ban_status(target, "EXPIRED")
+                        # Key in the bans table is still the original ip, not the subnet
+                        self.storage.update_ban_status(orig_ip, "EXPIRED")
                         continue
 
                     self.active_bans[target] = record
+                    if target != orig_ip:
+                        # The ban was re-keyed (e.g. subnet banning was turned on).
+                        # Re-key the bans table too, otherwise the next save_ban()
+                        # inserts a second row for the same ban and totals drift.
+                        self.storage.save_ban(record)
+                        self.storage.update_ban_status(orig_ip, "SUPERSEDED")
 
         # Step 1.5: If starting in LIVE mode, ensure dedicated chains and whitelist rules are active first
         if not self.dry_run:
@@ -109,30 +192,63 @@ class FirewallManager:
         self.reaper_thread = threading.Thread(target=self._expiration_loop, daemon=True)
         self.reaper_thread.start()
 
+    def _scan_utilsec_rules(self) -> List[FirewallRuleInfo]:
+        """Raw scan of the active backend, **including** UtilSec-owned rules.
+
+        ``get_firewall_rules()`` deliberately hides UtilSec rules (they would
+        pollute the [U] "external rules that need attention" panel), which is
+        why the startup sync used to receive an empty list and never restored
+        a single ban after a restart.
+        """
+        if self.active_backend == "iptables":
+            return self._scan_iptables_rules()
+        if self.active_backend == "ufw":
+            return self._scan_ufw_rules()
+        if self.active_backend == "nft":
+            return self._scan_nft_rules()
+        return []
+
     def _sync_bans_with_firewall(self) -> None:
         """Synchronize active_bans with the actual firewall state at startup.
-        
-        Compares firewall rules with in-memory bans and storage:
-        1. Finds bans in firewall that are NOT in active_bans (process died without cleanup)
+
+        Compares UtilSec rules present in the firewall with memory and storage:
+        1. Finds UtilSec rules that are NOT in active_bans (process died without cleanup)
         2. Restores them to active_bans with preserved TTL (not reset)
-        3. Removes bans whose TTL already expired
+        3. Removes rules that overlap the whitelist and bans whose TTL already expired
+
+        Matching is done through :func:`_ban_key_variants` because the firewall
+        and the bans table spell the same ban differently (`1.2.3.4/32` vs
+        `1.2.3.4`, or `1.2.3.0/24` vs `1.2.3.4`).
         """
         now = time.time()
-        fw_rules = self.get_firewall_rules()
-        
-        # Find UtilSec rules currently in the firewall
-        firewall_utilsec_ips = set()
-        for rule in fw_rules:
-            if rule.source == "utilsec":
-                firewall_utilsec_ips.add(rule.ip)
-        
-        # Also check active_bans from memory
+
+        firewall_utilsec_ips = {
+            rule.ip
+            for rule in self._scan_utilsec_rules()
+            if rule.source == "utilsec" and rule.ip
+        }
+
         with self.lock:
             memory_bans = dict(self.active_bans)
-        
-        # For each UtilSec rule in firewall, check if it exists in memory/storage
-        for ip in firewall_utilsec_ips:
-            # Check if this rule matches or overlaps with whitelist!
+        mem_index: Dict[str, str] = {}
+        for key in memory_bans:
+            for variant in _ban_key_variants(key):
+                mem_index.setdefault(variant, key)
+
+        # Single storage round-trip: the old code called load_active_bans() once
+        # per firewall rule (N+1 queries at startup).
+        loaded: Dict[str, BanRecord] = self.storage.load_active_bans() if self.storage else {}
+        db_index: Dict[str, str] = {}
+        for key in loaded:
+            for variant in _ban_key_variants(key):
+                db_index.setdefault(variant, key)
+
+        for ip in sorted(firewall_utilsec_ips):
+            variants = _ban_key_variants(ip)
+            db_key = next((db_index[v] for v in variants if v in db_index), None)
+            mem_key = next((mem_index[v] for v in variants if v in mem_index), None)
+
+            # Check if this rule overlaps with the whitelist!
             if self.is_ip_whitelisted(ip):
                 logger.warning("[SYNC] Firewall rule for %s overlaps with whitelist! Removing rule immediately.", ip)
                 temp_rec = BanRecord(
@@ -140,55 +256,64 @@ class FirewallManager:
                     attack_count=0, banned_at=now, ban_duration=0, backend=self.active_backend
                 )
                 self._exec_unban_system(temp_rec)
-                if self.storage:
-                    self.storage.update_ban_status(ip, "WHITELISTED")
+                if self.storage and db_key:
+                    self.storage.update_ban_status(db_key, "WHITELISTED")
                 continue
 
-            if ip in memory_bans:
+            if mem_key is not None:
                 # Already in memory, skip
                 continue
-            
-            # Check storage for this ban
-            record = None
-            if self.storage:
-                loaded = self.storage.load_active_bans()
-                if ip in loaded:
-                    record = loaded[ip]
-            
-            if record is None:
+
+            if db_key is None:
                 # No storage record - this is an orphaned rule, leave it (user can clean it manually)
                 logger.info("[SYNC] Found orphaned firewall rule for %s (no storage record). Leaving in place.", ip)
                 continue
-            
+
+            record = loaded[db_key]
+
             # Check if TTL expired
             if record.ban_duration > 0 and now >= record.unban_at:
-                # Expired while app was offline - mark as EXPIRED
-                self.storage.update_ban_status(ip, "EXPIRED")
-                logger.info("[SYNC] Ban %s has expired (unban_at=%s). Marked as EXPIRED.", ip, record.unban_at)
+                # Expired while app was offline: mark the row AND drop the rule,
+                # otherwise the firewall keeps a ban the database already forgot.
+                self.storage.update_ban_status(db_key, "EXPIRED")
+                self._exec_unban_system(BanRecord(
+                    ip=ip, reason="Expired while offline", matched_pattern="",
+                    attack_count=0, banned_at=now, ban_duration=0,
+                    backend=self.active_backend,
+                ))
+                logger.info("[SYNC] Ban %s has expired (unban_at=%s). Rule removed.", db_key, record.unban_at)
                 continue
-            
+
             # Valid ban - restore to active_bans with original TTL preserved
-            subnet_ip = self.to_subnet(ip)
+            subnet_ip = self.to_subnet(db_key)
             if self.is_ip_whitelisted(subnet_ip):
-                subnet_ip = ip
+                subnet_ip = db_key
             record.ip = subnet_ip
             record.status = "BANNED"
             record.backend = self.active_backend
-            self.active_bans[subnet_ip] = record
-            
+            with self.lock:
+                self.active_bans.setdefault(subnet_ip, record)
+
             logger.info("[SYNC] Restored ban for %s (unban_at=%s, ttl_remaining=%.0fs)",
                         subnet_ip, record.unban_at, record.unban_at - now)
-        
+
         # Clean up: remove from active_bans any ban whose TTL expired
         expired_ips = []
         with self.lock:
             for ip, record in self.active_bans.items():
                 if record.ban_duration > 0 and now >= record.unban_at:
                     expired_ips.append(ip)
-        
+
+            for ip in expired_ips:
+                self.active_bans.pop(ip, None)
+                self._exec_unban_system(BanRecord(
+                    ip=ip, reason="Expired while offline", matched_pattern="",
+                    attack_count=0, banned_at=now, ban_duration=0,
+                    backend=self.active_backend,
+                ))
+
         for ip in expired_ips:
-            record = self.active_bans.pop(ip, None)
-            if record and self.storage:
+            if self.storage:
                 self.storage.update_ban_status(ip, "EXPIRED")
             logger.info("[SYNC] Removed expired ban for %s from active_bans", ip)
 
@@ -223,12 +348,57 @@ class FirewallManager:
             return False
 
     def _init_scripts(self) -> None:
-        """Create shell scripts for audit and manual execution in dry-run mode."""
-        for filename in ["banned_ips.sh", "unban_ips.sh"]:
-            if not os.path.exists(filename):
-                with open(filename, "w", encoding="utf-8") as f:
-                    f.write("#!/bin/bash\n# UtilSec Sentinel Generated Firewall Script\n\n")
-                os.chmod(filename, 0o755)
+        """Create shell scripts for audit and manual execution in dry-run mode.
+
+        Existing files are indexed so repeated bans are never appended twice
+        (the files used to grow without bound, 90% duplicates).
+        """
+        for filename in ("banned_ips.sh", "unban_ips.sh"):
+            path = os.path.join(self.audit_dir, filename)
+            if not os.path.exists(path):
+                try:
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write("#!/bin/bash\n# UtilSec Sentinel Generated Firewall Script\n\n")
+                    os.chmod(path, 0o755)
+                except OSError as exc:
+                    logger.warning("Could not create audit script %s: %s", path, exc)
+            self._audit_seen[filename] = self._load_audit_commands(path)
+
+    @staticmethod
+    def _load_audit_commands(path: str) -> set:
+        """Index the non-comment lines already present in an audit script."""
+        seen: set = set()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        seen.add(line)
+        except OSError:
+            pass
+        return seen
+
+    @staticmethod
+    def _audit_comment(text: str) -> str:
+        """Flatten a value so it can never break out of the shell comment line."""
+        return " ".join(str(text).split())
+
+    def _write_audit_line(self, filename: str, comment: str, command: str) -> None:
+        """Append one commented command to an audit script (thread safe, deduplicated).
+
+        ``command`` must already be produced by :func:`shlex.join`.
+        """
+        path = os.path.join(self.audit_dir, filename)
+        with self._audit_lock:
+            seen = self._audit_seen.setdefault(filename, set())
+            if command in seen:
+                return
+            seen.add(command)
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(f"{comment}\n{command}\n")
+            except OSError as exc:
+                logger.warning("Could not append to audit script %s: %s", path, exc)
 
     def _get_whitelist_networks(self, config=None) -> List:
         """Returns the current list of whitelisted ip_network objects."""
@@ -273,28 +443,90 @@ class FirewallManager:
 
     def is_ip_banned(self, ip_str: str) -> Optional[BanRecord]:
         """Checks if an IP matches an active ban or belongs to a banned subnet.
-        
+
         Defense-in-depth: Any IP in the whitelist is NEVER considered banned.
+
+        This sits on the hot path (called once per log line), so banned networks
+        are parsed once per membership change and bucketed by /16 (IPv4) or /64
+        (IPv6) instead of re-parsing every CIDR on every line.
         """
         ip_str = ip_str.strip()
         if self.is_ip_whitelisted(ip_str):
             return None
 
         with self.lock:
-            if ip_str in self.active_bans:
-                return self.active_bans[ip_str]
+            record = self.active_bans.get(ip_str)
+            if record is not None:
+                return record
+
             try:
                 addr = ipaddress.ip_address(ip_str)
-                for target, record in self.active_bans.items():
-                    if "/" in target:
-                        try:
-                            if addr in ipaddress.ip_network(target, strict=False):
-                                return record
-                        except ValueError:
-                            pass
             except ValueError:
-                pass
+                return None
+
+            self._refresh_ban_cache()
+
+            shift = _BUCKET_SHIFT[addr.version]
+            bucket = self._banned_buckets.get((addr.version, int(addr) >> shift), ())
+            for net, key in bucket:
+                if addr in net:
+                    rec = self.active_bans.get(key)
+                    if rec is not None:
+                        return rec
+            for net, key in self._banned_overflow:
+                if addr in net:
+                    rec = self.active_bans.get(key)
+                    if rec is not None:
+                        return rec
         return None
+
+    def _refresh_ban_cache(self) -> None:
+        """Rebuild the parsed-network index when ban membership changed.
+
+        Must be called with ``self.lock`` held. Membership is tracked by dict
+        length, which covers every add/remove (external injection included);
+        value replacements are safe because records are always read live.
+
+        Networks are bucketed by prefix (/16 for IPv4, /64 for IPv6) so a
+        lookup only compares the handful of ranges that could possibly match.
+        Networks wider than ``_MAX_BUCKETS_PER_NET`` are kept in a small
+        overflow list that is always scanned.
+        """
+        if self._banned_nets_len >= 0 and self._banned_nets_len == len(self.active_bans):
+            return
+
+        buckets: Dict[Tuple[int, int], List[Tuple[Any, str]]] = {}
+        overflow: List[Tuple[Any, str]] = []
+
+        for key in self.active_bans:
+            if "/" not in key:
+                continue
+            net = self._parsed_by_key.get(key)
+            if net is None:
+                try:
+                    net = ipaddress.ip_network(key, strict=False)
+                except ValueError:
+                    continue
+                self._parsed_by_key[key] = net
+            entry = (net, key)
+            shift = _BUCKET_SHIFT[net.version]
+            first = int(net.network_address) >> shift
+            last = int(net.broadcast_address) >> shift
+            if (last - first + 1) > _MAX_BUCKETS_PER_NET:
+                overflow.append(entry)
+                continue
+            for bucket_no in range(first, last + 1):
+                buckets.setdefault((net.version, bucket_no), []).append(entry)
+
+        # Drop memoized entries for targets that are no longer banned
+        if len(self._parsed_by_key) > len(self.active_bans) + 64:
+            self._parsed_by_key = {
+                k: v for k, v in self._parsed_by_key.items() if k in self.active_bans
+            }
+
+        self._banned_buckets = buckets
+        self._banned_overflow = overflow
+        self._banned_nets_len = len(self.active_bans)
 
     def _get_safe_subnets(self, network, whitelist_nets: List) -> List:
         """Split a network into subnets that don't overlap with any whitelisted network.
@@ -346,6 +578,14 @@ class FirewallManager:
         cfg = config or self.config
         whitelist = self._get_whitelist_networks(cfg)
 
+        # 0. Input validation: only well-formed IPs/networks may reach the
+        #    firewall or the generated audit scripts (command-injection guard).
+        normalized = parse_ip_or_network(ip)
+        if normalized is None:
+            logger.warning("Refusing to ban %r: not a valid IP address or CIDR network", ip)
+            return False
+        ip = normalized
+
         # 1. Whitelist protection: refuse immediately if IP or range is whitelisted
         if self.is_ip_whitelisted(ip, config=cfg):
             logger.warning("Refusing to ban %s: IP or range is in whitelist!", ip)
@@ -392,46 +632,52 @@ class FirewallManager:
 
     def _do_ban(self, ip: str, reason: str, matched_pattern: str, duration: int,
                 last_url: str, count: int) -> bool:
-        """Internal: create a ban record and execute firewall rules for a single target."""
+        """Internal: create a ban record and execute firewall rules for a single target.
+
+        Only bookkeeping happens while holding ``self.lock``; subprocess calls and
+        SQLite writes run outside it so ``is_ip_banned()`` (once per log line) is
+        never blocked by a firewall command.
+        """
         now = time.time()
+        created = False
         with self.lock:
-            if ip in self.active_bans:
-                record = self.active_bans[ip]
+            record = self.active_bans.get(ip)
+            if record is not None:
                 record.attack_count += count
                 record.last_url = last_url or record.last_url
                 record.banned_at = now
                 if duration > record.ban_duration:
                     record.ban_duration = duration
-
                 if not self.dry_run:
                     record.status = "BANNED"
                     record.backend = self.active_backend
-                    self._exec_ban_system(record)
-                    self.kill_active_connections(ip)
+            else:
+                record = BanRecord(
+                    ip=ip,
+                    reason=reason,
+                    matched_pattern=matched_pattern,
+                    attack_count=count,
+                    banned_at=now,
+                    ban_duration=duration,
+                    status="SIMULATED" if self.dry_run else "BANNED",
+                    backend=self.active_backend,
+                    last_url=last_url,
+                )
+                self.active_bans[ip] = record
+                created = True
 
-                if self.storage:
-                    self.storage.save_ban(record)
-                return True
-
-            record = BanRecord(
-                ip=ip,
-                reason=reason,
-                matched_pattern=matched_pattern,
-                attack_count=count,
-                banned_at=now,
-                ban_duration=duration,
-                status="SIMULATED" if self.dry_run else "BANNED",
-                backend=self.active_backend,
-                last_url=last_url,
-            )
-            self.active_bans[ip] = record
-
-        self._exec_ban_system(record)
+        # Side effects (outside the lock)
+        if created or not self.dry_run:
+            # A fresh ban always records the audit line; a repeated ban only
+            # re-applies rules when we are in live mode.
+            self._exec_ban_system(record, force_kill=created)
+        if not created and not self.dry_run:
+            self.kill_active_connections(ip)
 
         if self.storage:
             self.storage.save_ban(record)
 
-        if self.on_ban_change:
+        if self.on_ban_change and created:
             self.on_ban_change(record, "BAN")
 
         return True
@@ -439,7 +685,10 @@ class FirewallManager:
     def unban_ip(self, ip: str, manual: bool = False) -> bool:
         """Unbans an IP address or subnet (UtilSec-managed ban)."""
         record: Optional[BanRecord] = None
-        target = ip.strip()
+        target = (ip or "").strip()
+        if parse_ip_or_network(target) is None:
+            logger.warning("Refusing to unban %r: not a valid IP address or CIDR network", ip)
+            return False
         with self.lock:
             if target not in self.active_bans:
                 target = self.to_subnet(target)
@@ -461,6 +710,18 @@ class FirewallManager:
             self.on_ban_change(record, "UNBAN")
 
         return True
+
+    def clear_expired(self) -> int:
+        """Drop expired ban records from memory (used by the TUI [C] key).
+
+        Replaces the previous in-place dict rebuild done by the UI without
+        holding the firewall lock.
+        """
+        with self.lock:
+            expired = [ip for ip, rec in self.active_bans.items() if rec.is_expired]
+            for ip in expired:
+                self.active_bans.pop(ip, None)
+        return len(expired)
 
     def unban_fail2ban(self, ip: str, jail_name: str = "") -> bool:
         """Unbans an IP that was banned by fail2ban.
@@ -726,25 +987,137 @@ class FirewallManager:
                 logger.error("Error ensuring ufw whitelist rules: %s", e)
             return count
 
+        elif self.active_backend == "nft":
+            # The UtilSec chain is rebuilt wholesale so whitelist removals do
+            # not leave stale ACCEPT rules above the drops.
+            self._ensure_nft_infra(force=True)
+            return len(whitelist_nets)
+
         return len(whitelist_nets)
 
-    def kill_active_connections(self, ip: str) -> None:
+    def _ensure_nft_infra(self, force: bool = False) -> None:
+        """Create the UtilSec nftables table, sets, hook chain and rules.
+
+        The previous implementation ran ``nft add element inet filter
+        utilsec_bans ...`` against a table/set that nothing ever created, so
+        every ban on the nft backend failed with "No such file or directory"
+        while still being reported as banned.
+
+        Everything lives in a private ``inet utilsec`` table and is rebuilt from
+        scratch (``flush chain``) so whitelist changes cannot leave stale rules
+        behind. Set members are never flushed: bans must survive a restart.
+        """
+        if self._nft_infra_ready and not force:
+            return
+
+        prefix = [] if os.geteuid() == 0 else ["sudo", "-n"]
+
+        declarations = [
+            ["add", "table", "inet", NFT_TABLE],
+            ["add", "set", "inet", NFT_TABLE, NFT_SETS[4], "{ type ipv4_addr; flags interval; }"],
+            ["add", "set", "inet", NFT_TABLE, NFT_SETS[6], "{ type ipv6_addr; flags interval; }"],
+            # Own hook, evaluated *before* the distro input chain, so a ban wins
+            # regardless of what the distribution installed at priority 0.
+            ["add", "chain", "inet", NFT_TABLE, "input",
+             "{ type filter hook input priority -10; policy accept; }"],
+        ]
+        errors: list = []
+        for args in declarations:
+            try:
+                proc = subprocess.run(prefix + ["nft"] + args, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, timeout=10)
+                if proc.returncode != 0 and args[1] != "chain":
+                    errors.append(proc.stderr.decode("utf-8", errors="replace").strip())
+            except Exception as exc:
+                logger.debug("nft %s: %s", " ".join(args), exc)
+
+        # Verify what actually landed: a silently missing set means every ban
+        # would be reported as applied while never being enforced.
+        listing = ""
+        try:
+            probe = subprocess.run(prefix + ["nft", "list", "table", "inet", NFT_TABLE],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+            listing = probe.stdout.decode("utf-8", errors="replace")
+            probe_ok = probe.returncode == 0
+        except Exception as exc:
+            logger.debug("nft list table: %s", exc)
+            probe_ok = False
+
+        if not probe_ok or NFT_SETS[4] not in listing or NFT_SETS[6] not in listing:
+            detail = next((e for e in errors if e), "nftables no disponible o sin privilegios")
+            logger.error("Could not prepare nftables infrastructure (%s): bans will be "
+                         "reported but NOT enforced on this host.", detail)
+            # Avoid a subprocess storm on every ban; the failure was reported.
+            self._nft_infra_ready = True
+            return
+
+        # Rebuild our own chain: whitelist ACCEPTs first (mirrors the iptables
+        # ordering), then the set drops.
+        try:
+            subprocess.run(prefix + ["nft", "flush", "chain", "inet", NFT_TABLE, "input"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        except Exception as exc:
+            logger.debug("nft flush chain: %s", exc)
+
+        for wnet in self._get_whitelist_networks():
+            flag = "ip6" if wnet.version == 6 else "ip"
+            args = ["add", "rule", "inet", NFT_TABLE, "input", flag, "saddr", str(wnet), "accept"]
+            try:
+                subprocess.run(prefix + ["nft"] + args, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, timeout=10)
+            except Exception as exc:
+                logger.debug("nft whitelist rule: %s", exc)
+
+        for family_flag, set_name in (("ip", NFT_SETS[4]), ("ip6", NFT_SETS[6])):
+            args = ["add", "rule", "inet", NFT_TABLE, "input", family_flag, "saddr", f"@{set_name}", "drop"]
+            try:
+                subprocess.run(prefix + ["nft"] + args, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, timeout=10)
+            except Exception as exc:
+                logger.debug("nft drop rule: %s", exc)
+
+        self._nft_infra_ready = True
+
+    def _should_kill(self, target: str, force: bool = False) -> bool:
+        """Rate-limit socket kills per target. Returns True if the kill may proceed."""
+        now = time.time()
+        with self._kill_times_lock:
+            last = self._kill_times.get(target, 0.0)
+            if not force and (now - last) < self.kill_cooldown:
+                return False
+            self._kill_times[target] = now
+            if len(self._kill_times) > 4096:
+                stale = now - (self.kill_cooldown * 10)
+                for key in [k for k, v in self._kill_times.items() if v < stale]:
+                    del self._kill_times[key]
+        return True
+
+    def kill_active_connections(self, ip: str, force: bool = False) -> None:
         """Forcibly close active TCP sockets (Keep-Alive) for an attacking IP or subnet.
 
         Terminates both native IPv4/IPv6 and IPv4-mapped IPv6 sockets (::ffff:x.x.x.x),
         which are standard when web servers like Apache or Nginx listen on dual-stack [::].
         Supports CIDR notation (e.g. 35.205.254.0/24) to terminate all sockets across the subnet.
+
+        Each call spawns up to 4 processes (``ss`` + ``conntrack``) and costs ~10 ms,
+        so calls are rate-limited per target: a banned attacker flooding the log
+        would otherwise force a fork storm on every single line. ``force=True`` is
+        reserved for the moment a brand new ban is installed.
         """
         if self.dry_run or not shutil.which("ss"):
             return
 
-        is_root = os.geteuid() == 0
-        prefix = [] if is_root else ["sudo", "-n"]
         kill_target = ip.strip()
 
         # Never kill sockets belonging to whitelisted IPs
         if self.is_ip_whitelisted(kill_target):
             return
+
+        if not self._should_kill(kill_target, force):
+            return
+
+        is_root = os.geteuid() == 0
+        prefix = [] if is_root else ["sudo", "-n"]
 
         try:
             # 1. Terminate native TCP destination socket (-t is strictly required by kernel inet_diag)
@@ -782,7 +1155,7 @@ class FirewallManager:
         except Exception as e:
             logger.debug("Failed to terminate active sockets for %s: %s", kill_target, e)
 
-    def _exec_ban_system(self, record: BanRecord) -> None:
+    def _exec_ban_system(self, record: BanRecord, force_kill: bool = False) -> None:
         ip = record.ip
         if self.is_ip_whitelisted(ip):
             logger.warning("Refusing _exec_ban_system for %s: IP or range is whitelisted!", ip)
@@ -811,12 +1184,19 @@ class FirewallManager:
         elif self.active_backend == "ufw":
             cmd = prefix + ["ufw", "insert", insert_pos, "deny", "from", ip, "to", "any", "comment", "UtilSec"]
         elif self.active_backend == "nft":
-            cmd = prefix + ["nft", "add", "element", "inet", "filter", "utilsec_bans", f"{{ {ip} }}"]
+            self._ensure_nft_infra()
+            cmd = prefix + ["nft", "add", "element", "inet", NFT_TABLE,
+                            _nft_set_for(ip), f"{{ {ip} }}"]
 
-        # If dry-run or failed execution, log to script
-        cmd_str = " ".join(cmd) if cmd else f"iptables -I UTILSEC-BAN 1 -s {ip} -j DROP # UtilSec ({record.reason})"
-        with open("banned_ips.sh", "a", encoding="utf-8") as f:
-            f.write(f"# [{datetime.now().isoformat()}] {record.reason} (URL: {record.last_url})\n{cmd_str}\n")
+        # Record the audit/replay line. shlex.join() quotes every argument so an
+        # exotic target can never break out of the generated shell script, and
+        # the nft "{ ... }" set literal survives as a single word.
+        cmd_str = shlex.join(cmd) if cmd else f"iptables -I UTILSEC-BAN 1 -s {shlex.quote(ip)} -j DROP"
+        comment = (
+            f"# [{datetime.now().isoformat()}] {self._audit_comment(record.reason)} "
+            f"(URL: {self._audit_comment(record.last_url)})"
+        )
+        self._write_audit_line("banned_ips.sh", comment, cmd_str)
 
         if not self.dry_run and cmd:
             try:
@@ -841,7 +1221,7 @@ class FirewallManager:
 
             # Kill existing active TCP connections (Keep-Alive) from banned IP/subnet
             if record.status != "ERROR":
-                self.kill_active_connections(ip)
+                self.kill_active_connections(ip, force=force_kill)
 
     def _exec_unban_system(self, record: BanRecord) -> None:
         ip = record.ip
@@ -854,11 +1234,12 @@ class FirewallManager:
         elif self.active_backend == "ufw":
             cmd = prefix + ["ufw", "delete", "deny", "from", ip, "to", "any"]
         elif self.active_backend == "nft":
-            cmd = prefix + ["nft", "delete", "element", "inet", "filter", "utilsec_bans", f"{{ {ip} }}"]
+            cmd = prefix + ["nft", "delete", "element", "inet", NFT_TABLE,
+                            _nft_set_for(ip), f"{{ {ip} }}"]
 
-        cmd_str = " ".join(cmd) if cmd else f"iptables -D UTILSEC-BAN -s {ip} -j DROP # UtilSec unban"
-        with open("unban_ips.sh", "a", encoding="utf-8") as f:
-            f.write(f"# [{datetime.now().isoformat()}] Unban {ip}\n{cmd_str}\n")
+        cmd_str = shlex.join(cmd) if cmd else f"iptables -D UTILSEC-BAN -s {shlex.quote(ip)} -j DROP"
+        comment = f"# [{datetime.now().isoformat()}] Unban {self._audit_comment(ip)}"
+        self._write_audit_line("unban_ips.sh", comment, cmd_str)
 
         if not self.dry_run and cmd:
             try:
@@ -1066,71 +1447,140 @@ class FirewallManager:
         return rules
 
     def _scan_nft_rules(self) -> List[FirewallRuleInfo]:
-        """Scan nftables for UtilSec ban rules."""
+        """Scan nftables for UtilSec ban rules.
+
+        Handles both element sets, CIDR elements (``1.2.3.0/24``) and elements
+        that wrap across several lines. The previous version only accepted bare
+        addresses, so a /24 ban was invisible, and it bailed out as soon as a
+        line contained ``}``, which is exactly where single-element sets end.
+        """
         rules: List[FirewallRuleInfo] = []
         try:
+            is_root = os.geteuid() == 0
+            prefix = [] if is_root else ["sudo", "-n"]
             result = subprocess.run(
-                ["nft", "list", "table", "inet", "filter"],
+                prefix + ["nft", "list", "table", "inet", "utilsec"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
             )
             if result.returncode != 0:
                 return rules
             output = result.stdout.decode("utf-8", errors="replace")
-            if "utilsec_bans" not in output:
+            if "utilsec_bans4" not in output and "utilsec_bans6" not in output:
                 return rules
-            # Extract IPs from the set
+
             in_set = False
             for line in output.splitlines():
-                if "utilsec_bans" in line and "{" in line:
-                    in_set = True
-                    continue
-                if in_set:
-                    if "}" in line:
-                        break
-                    for token in line.replace("{", " ").replace("}", " ").replace(",", " ").split():
-                        token = token.strip()
-                        if not token or token.startswith('"') or token.startswith("'"):
-                            continue
-                        try:
-                            ipaddress.ip_address(token)
-                            rules.append(FirewallRuleInfo(
-                                ip=token,
-                                source="utilsec",
-                                reason="UtilSec nft rule",
-                                backend="nft",
-                            ))
-                        except ValueError:
-                            continue
+                stripped = line.strip()
+                if not in_set:
+                    if ("utilsec_bans4" in stripped or "utilsec_bans6" in stripped) and "{" in stripped:
+                        in_set = True
+                        payload = stripped.split("{", 1)[1]
+                    else:
+                        continue
+                else:
+                    payload = stripped
+
+                if "}" in payload:
+                    in_set = False
+                    payload = payload.split("}", 1)[0]
+
+                for token in payload.replace(",", " ").split():
+                    token = token.strip()
+                    if not token or token[0] in "\"'{'":
+                        continue
+                    element = self._normalize_source(token)
+                    if not element:
+                        continue
+                    rules.append(FirewallRuleInfo(
+                        ip=element,
+                        source="utilsec",
+                        reason="UtilSec nft rule",
+                        backend="nft",
+                    ))
         except Exception as e:
             logger.debug("Error scanning nftables: %s", e)
         return rules
 
+    @staticmethod
+    def _normalize_source(value: str) -> str:
+        """Canonical source address, with the CIDR prefix preserved.
+
+        Host routes collapse to the bare IP form used as the bans-table key.
+        Returns ``""`` for the catch-all (unrestricted) source and for anything
+        that is not an address or network.
+        """
+        if value.lower() in _UNRESTRICTED_SOURCES:
+            return ""
+        norm = parse_ip_or_network(value)
+        if not norm:
+            return ""
+        try:
+            net = ipaddress.ip_network(norm, strict=False)
+        except ValueError:
+            return norm
+        if net.prefixlen == net.max_prefixlen:
+            return str(net.network_address)
+        return str(net)
+
     def _extract_ip_from_iptables_line(self, line: str) -> str:
-        """Extract IP address from an iptables -L output line."""
+        """Extract the SOURCE address from an ``iptables -L -n -v`` line.
+
+        Columns are ``num pkts bytes target proto opt in out source destination``
+        (``--line-numbers`` prepends ``num``). The previous implementation walked
+        every token and returned the *network address* of the first /24 or /32 it
+        found, which (a) dropped the CIDR prefix so the row could never match a
+        bans-table key, (b) ignored every other prefix length, and (c) could
+        return the local **destination** address instead of the source.
+        """
         parts = line.split()
-        for part in parts:
-            if part in ("DROP", "REJECT", "all", "--", "0.0.0.0/0", "0.0.0.0"):
+        if not parts:
+            return ""
+
+        # num/pkts/bytes are all integers when --line-numbers was used.
+        has_line_numbers = (
+            len(parts) >= 3 and parts[0].isdigit() and parts[1].isdigit() and parts[2].isdigit()
+        )
+        source_idx = 8 if has_line_numbers else 7
+
+        if len(parts) > source_idx:
+            candidate = self._normalize_source(parts[source_idx])
+            if candidate:
+                return candidate
+            if parts[source_idx].lower() in _UNRESTRICTED_SOURCES:
+                # Rule applies to every source: there is nothing to reconcile.
+                return ""
+
+        # Fallback for an unrecognized layout: scan tokens but never the last one
+        # (the destination column) and never pure integers (num/pkts/bytes).
+        limit = len(parts) - 1 if len(parts) >= 9 else len(parts)
+        for part in parts[:limit]:
+            if part.isdigit() or part in ("DROP", "REJECT", "all", "--", "*"):
                 continue
-            try:
-                network = ipaddress.ip_network(part, strict=False)
-                ip = str(network.network_address)
-                if network.prefixlen in (24, 32):
-                    return ip
-            except ValueError:
-                continue
+            candidate = self._normalize_source(part)
+            if candidate:
+                return candidate
         return ""
 
     def _extract_ip_from_ufw_line(self, line: str) -> str:
-        """Extract IP address from a ufw status output line."""
+        """Extract the source address from a ``ufw status numbered`` line.
+
+        ufw prints ``To Action From`` columns *without* the word "from" per row,
+        e.g. ``[ 2] Anywhere DENY IN 192.168.1.0/24``, so the source is whatever
+        follows the direction column. The prefix is preserved.
+        """
         parts = line.split()
         for i, part in enumerate(parts):
-            if part == "from" and i + 1 < len(parts):
-                candidate = parts[i + 1]
-                try:
-                    ipaddress.ip_address(candidate)
-                    return candidate
-                except ValueError:
+            if part.upper() in ("DENY", "REJECT", "ALLOW", "LIMIT") and i + 1 < len(parts):
+                if parts[i + 1].upper() not in ("IN", "OUT"):
                     continue
+                rest = parts[i + 2:]
+                if not rest:
+                    return ""
+                return self._normalize_source(rest[0])
+        # Fallback for output that does contain the literal keyword
+        for i, part in enumerate(parts):
+            if part == "from" and i + 1 < len(parts):
+                return self._normalize_source(parts[i + 1])
         return ""
 
     def get_active_bans_list(self, sort_by_ip: bool = False) -> List[BanRecord]:

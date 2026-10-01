@@ -834,17 +834,21 @@ class SentinelTUI:
             inp = self._prompt_input(stdscr, "Enter IP or Subnet to BAN (e.g. 1.2.3.4 or 1.2.3.0/24): ")
             if inp:
                 target = self.config.get_ban_target(inp)
-                banned = self.firewall.ban_ip(
-                    ip=target,
-                    reason="Manual Ban via TUI",
-                    matched_pattern="manual",
-                    duration=self.config.default_ban_duration,
-                    config=self.config,
-                )
-                if banned:
-                    self.set_status(f"Manually banned target: {target}")
+                if not target:
+                    # Not a valid IP/CIDR: refuse instead of forwarding raw text
+                    self.set_status(f"⚠️ '{inp[:40]}' is not a valid IP or CIDR network.")
                 else:
-                    self.set_status(f"⚠️ Target {target} is whitelisted! Ban refused.")
+                    banned = self.firewall.ban_ip(
+                        ip=target,
+                        reason="Manual Ban via TUI",
+                        matched_pattern="manual",
+                        duration=self.config.default_ban_duration,
+                        config=self.config,
+                    )
+                    if banned:
+                        self.set_status(f"Manually banned target: {target}")
+                    else:
+                        self.set_status(f"⚠️ Target {target} is whitelisted! Ban refused.")
 
         elif key in (ord("a"), ord("A")):
             # Add custom attack rule
@@ -948,10 +952,8 @@ class SentinelTUI:
 
         elif key in (ord("c"), ord("C")):
             # Clear expired / unbanned records from memory
-            self.firewall.active_bans = {
-                ip: b for ip, b in self.firewall.active_bans.items() if not b.is_expired
-            }
-            self.set_status("Cleaned expired records from display.")
+            removed = self.firewall.clear_expired()
+            self.set_status(f"Cleaned {removed} expired record(s) from display.")
 
         elif key in (ord("i"), ord("I")):
             # Show copyright / about modal

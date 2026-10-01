@@ -18,6 +18,10 @@ class TestSentinelCore(unittest.TestCase):
 
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
+        # Keep generated audit scripts (banned_ips.sh / unban_ips.sh) out of the
+        # repository working tree: they used to accumulate test leftovers.
+        self._prev_audit_dir = os.environ.get("UTILSEC_AUDIT_DIR")
+        os.environ["UTILSEC_AUDIT_DIR"] = self.tmp_dir.name
         self.config_path = os.path.join(self.tmp_dir.name, "test_config.json")
         self.db_path = os.path.join(self.tmp_dir.name, "test_history.db")
 
@@ -51,6 +55,11 @@ class TestSentinelCore(unittest.TestCase):
 
     def tearDown(self):
         self.firewall.stop()
+        self.storage.close()
+        if self._prev_audit_dir is None:
+            os.environ.pop("UTILSEC_AUDIT_DIR", None)
+        else:
+            os.environ["UTILSEC_AUDIT_DIR"] = self._prev_audit_dir
         self.tmp_dir.cleanup()
 
     def test_whitelist(self):

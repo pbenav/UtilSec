@@ -42,13 +42,13 @@ Consulta [LICENSE](LICENSE) para más detalles.
 - **Bloqueo por Subred /24 (Máscara de 24 bits)**:
   - Al detectar un ataque, **bloquea la subred `/24` completa** del atacante (256 direcciones IP simultáneas) para frustrar ataques rotativos o proxies distribuidos dentro del mismo rango.
 - **Gestión Avanzada de Cortafuegos**:
-  - Compatible con `iptables`, `ufw`, `nftables`.
+  - Compatible con `iptables`, `ufw`, `nftables` (en `nft`, la tabla y los conjuntos se crean automáticamente en `inet utilsec`).
   - Modo **Simulación / Dry-Run** activo por defecto para pruebas seguras sin necesidad de privilegios de superusuario (*root*).
   - Generación automática de scripts de auditoría: `banned_ips.sh` y `unban_ips.sh`.
   - Temporizador de desbloqueo automático (TTL) en segundo plano (por defecto 3600 segundos).
   - Lista blanca (*whitelist*) para IPs locales (`127.0.0.1`, RFC 1918) y rangos de red seguros (protegidas ante bloqueos de subred).
 - **Persistencia de Estado**:
-  - **Persistencia de Bans**: Los bloqueos se restauran automáticamente al reiniciar el proceso. Si existen reglas en iptables/ufw que no estaban en memoria, se recuperan conservando su tiempo original de expiración (TTL). Los bans expirados se marcan como `EXPIRED` y se eliminan de la memoria.
+  - **Persistencia de Bans**: Los bloqueos se restauran automáticamente al reiniciar el proceso. Si existen reglas en `iptables`/`ufw`/`nft` que no estaban en memoria, se recuperan conservando su tiempo original de expiración (TTL). Los bans expirados se marcan como `EXPIRED`, se eliminan de la memoria **y se retira su regla del cortafuegos**; si la regla coincide con la lista blanca se elimina y se marca como `WHITELISTED`.
   - **Persistencia de Configuración de Registros de Log**: Las rutas de archivos de log configuradas se guardan en SQLite y se cargan automáticamente al iniciar (a menos que se especifique con el parámetro `--log`).
 - **Persistencia en base de datos SQLite** (`sentinel_history.db`).
 - **Panel de Estadísticas y Geolocalización**:
@@ -122,16 +122,23 @@ sudo ./scripts/setup_modsecurity.sh
 
 ## Configuración (`config.json`)
 
-El archivo `config.json` permite personalizar todos los parámetros:
+El archivo `config.json` permite personalizar todos los parámetros. La plantilla completa (con todas las reglas heurísticas por defecto) está en [`config.json.example`](config.json.example):
 
 ```json
 {
   "log_file": "logs",
+  "log_files": [
+    { "name": "Access Global", "path": "/var/log/apache2/access.log" }
+  ],
   "firewall_backend": "auto",
   "dry_run": true,
+  "default_ban_duration": 3600,
   "threshold_404": 2,
   "threshold_403": 1,
   "window_seconds": 60,
+  "ban_subnet": true,
+  "subnet_cidr_ipv4": 24,
+  "subnet_cidr_ipv6": 64,
   "whitelist": [
     "127.0.0.1",
     "::1",
@@ -149,10 +156,46 @@ El archivo `config.json` permite personalizar todos los parámetros:
 }
 ```
 
+| Parámetro | Descripción |
+|---|---|
+| `log_files` | Lista de registros a monitorizar (`name=path`). Tiene prioridad sobre `log_file`. |
+| `log_file` | Registro único de reserva cuando `log_files` está vacío. |
+| `dry_run` | `true` = simulación (sin tocar el cortafuegos), `false` = cortafuegos real. |
+| `firewall_backend` | `auto`, `iptables`, `ufw` o `nft`. |
+| `default_ban_duration` | Duración del ban en segundos (`0` = permanente). |
+| `ban_subnet` / `subnet_cidr_ipv4` / `subnet_cidr_ipv6` | Bloqueo por subred (`/24` por defecto en IPv4, `/64` en IPv6). |
+| `threshold_404` / `threshold_403` / `window_seconds` | Ventana deslizante de control de tasa. |
+| `whitelist` | IPs y rangos que **nunca** se bloquean (se separan automáticamente de cualquier subred banneada). |
+| `user_patterns` / `heuristic_rules` | Firmas de ataque capa 1 y capa 2. |
+
 ---
 
 ## Ejecutar Pruebas Automatizadas
 
+Con `unittest` (sin dependencias externas):
 ```bash
-python3 -m unittest tests/test_sentinel.py
+python3 -m unittest discover -s tests
+```
+
+Con `pytest`:
+```bash
+python3 -m pytest
+```
+
+Los tests cubren el motor de detección, la persistencia, el análisis de estadísticas y el escaneo/sincronización del cortafuegos (`tests/test_firewall_scan.py`).
+
+Las pruebas escriben los scripts de auditoría en un directorio temporal (`UTILSEC_AUDIT_DIR`), por lo que no ensucian el árbol de trabajo.
+
+---
+
+## Instalación como módulo (opcional)
+
+El proyecto incluye un [`pyproject.toml`](pyproject.toml); solo es necesario si quieres el ejecutable `utilsec-sentinel` en el `PATH`:
+```bash
+pip install .
+utilsec-sentinel
+```
+Uso directo desde el repositorio (recomendado):
+```bash
+python3 sentinel.py
 ```
