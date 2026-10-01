@@ -189,7 +189,7 @@ class LogWatcher:
 class LogWatcherManager:
     """Manages multiple concurrent LogWatcher instances for multi-screen monitoring."""
 
-    def __init__(self, on_request: Callable[..., None], default_replay_lines: int = 100):
+    def __init__(self, on_request: Callable[..., None], default_replay_lines: int = 0):
         self.on_request = on_request
         self.default_replay_lines = default_replay_lines
         self.watchers: Dict[str, LogWatcher] = {}

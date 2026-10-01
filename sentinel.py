@@ -48,7 +48,7 @@ def main():
     parser.add_argument("--ban-time", type=int, help="Ban duration in seconds")
     parser.add_argument("--threshold", type=int, help="Number of 404s within window to trigger ban (default: 2)")
     parser.add_argument("--threshold-403", type=int, help="Number of 403s within window to trigger ban (default: 1)")
-    parser.add_argument("--replay", type=int, default=100, help="Replay last N lines from existing log (default: 100 lines)")
+    parser.add_argument("--replay", type=int, default=0, help="Replay last N lines from existing log (default: 0 lines)")
     parser.add_argument("--headless", action="store_true", help="Run without TUI (headless/daemon console mode)")
     parser.add_argument("--subnet", dest="subnet", action="store_true", default=None, help="Ban /24 subnet instead of single IP (default)")
     parser.add_argument("--no-subnet", dest="subnet", action="store_false", help="Ban single IP address only")
