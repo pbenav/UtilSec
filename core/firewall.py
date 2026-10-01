@@ -11,6 +11,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from core.models import BanRecord
 from core.storage import StorageManager
+from core.geoip import geoip_lookup
 from core.backends import DryRunBackend, IptablesBackend
 
 logger = logging.getLogger("UtilSec.Firewall")
@@ -180,7 +181,8 @@ class FirewallManager:
                     attack_count=0, 
                     banned_at=now, 
                     ban_duration=0,
-                    backend=self.active_backend
+                    backend=self.active_backend,
+                    country=geoip_lookup.get_country(ip.split('/')[0])
                 )
                 if self.storage:
                     self.storage.save_ban(record)
@@ -458,6 +460,7 @@ class FirewallManager:
                 status="SIMULATED" if self.dry_run else "BANNED",
                 backend=self.active_backend,
                 last_url=last_url,
+                country=geoip_lookup.get_country(ip.split('/')[0])
             )
             self.active_bans[ip] = record
 

@@ -1130,7 +1130,7 @@ class SentinelTUI:
                           border_line, curses.color_pair(self.C_INFO))
 
             # Column widths
-            col_ip = 18
+            col_ip = 23
             col_reason = 30
             col_status = 8
             col_hits = 5
@@ -1163,7 +1163,9 @@ class SentinelTUI:
                     reason_disp = ban.reason[:col_reason]
                     if len(ban.reason) > col_reason:
                         reason_disp += ".."
-                    line = f"  {list_idx + 1:>4}. {ban.ip:<{col_ip}} {reason_disp:<{col_reason}} {ban.attack_count:>{col_hits}}  {ban.status:<{col_status}}"
+                    c_code = getattr(ban, 'country', '??')
+                    disp_ip = f"[{c_code}] {ban.ip}"
+                    line = f"  {list_idx + 1:>4}. {disp_ip:<{col_ip}} {reason_disp:<{col_reason}} {ban.attack_count:>{col_hits}}  {ban.status:<{col_status}}"
                     if len(line) > modal_w - 2:
                         line = line[:modal_w - 4] + ".."
                     y = list_start_y + i
@@ -1331,7 +1333,7 @@ class SentinelTUI:
                           border_line, curses.color_pair(self.C_INFO))
 
             # Column widths
-            col_ip = 18
+            col_ip = 23
             col_source = 12
             col_reason = 28
             col_rule = 5

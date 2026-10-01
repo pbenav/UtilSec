@@ -16,6 +16,7 @@ class AttackEvent:
     timestamp: datetime = field(default_factory=datetime.now)
     raw_line: str = ""
     source_log: str = ""
+    country: str = "??"
 
     def summary(self) -> str:
         time_str = self.timestamp.strftime("%H:%M:%S")
@@ -34,6 +35,7 @@ class BanRecord:
     status: str = "BANNED"  # BANNED, SIMULATED, UNBANNED, EXPIRED
     backend: str = "dry-run"
     last_url: str = ""
+    country: str = "??"
 
     @property
     def unban_at(self) -> float:

@@ -56,6 +56,24 @@ class StorageManager:
                 except Exception:
                     pass
 
+            # Auto-migrate if country column does not exist in bans
+            cursor.execute("PRAGMA table_info(bans)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if "country" not in cols:
+                try:
+                    cursor.execute("ALTER TABLE bans ADD COLUMN country TEXT DEFAULT '??'")
+                except Exception:
+                    pass
+
+            # Auto-migrate if country column does not exist in events
+            cursor.execute("PRAGMA table_info(events)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if "country" not in cols:
+                try:
+                    cursor.execute("ALTER TABLE events ADD COLUMN country TEXT DEFAULT '??'")
+                except Exception:
+                    pass
+
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_ip ON events (ip)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_time ON events (timestamp)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_src ON events (source_log)")
@@ -77,8 +95,8 @@ class StorageManager:
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO bans (ip, reason, matched_pattern, attack_count, banned_at, ban_duration, status, backend, last_url)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO bans (ip, reason, matched_pattern, attack_count, banned_at, ban_duration, status, backend, last_url, country)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(ip) DO UPDATE SET
                     reason=excluded.reason,
                     matched_pattern=excluded.matched_pattern,
@@ -90,7 +108,7 @@ class StorageManager:
                     last_url=excluded.last_url
             """, (
                 ban.ip, ban.reason, ban.matched_pattern, ban.attack_count,
-                ban.banned_at, ban.ban_duration, ban.status, ban.backend, ban.last_url
+                ban.banned_at, ban.ban_duration, ban.status, ban.backend, ban.last_url, getattr(ban, "country", "??")
             ))
             conn.commit()
 
@@ -104,7 +122,7 @@ class StorageManager:
         active_bans: Dict[str, BanRecord] = {}
         with self._get_conn() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT ip, reason, matched_pattern, attack_count, banned_at, ban_duration, status, backend, last_url FROM bans WHERE status IN ('BANNED', 'SIMULATED')")
+            cursor.execute("SELECT ip, reason, matched_pattern, attack_count, banned_at, ban_duration, status, backend, last_url, country FROM bans WHERE status IN ('BANNED', 'SIMULATED')")
             for row in cursor.fetchall():
                 ban = BanRecord(
                     ip=row[0],
@@ -116,6 +134,7 @@ class StorageManager:
                     status=row[6],
                     backend=row[7],
                     last_url=row[8],
+                    country=row[9] if len(row) > 9 else "??",
                 )
                 active_bans[ban.ip] = ban
         return active_bans
@@ -124,8 +143,8 @@ class StorageManager:
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO events (timestamp, ip, method, url, status_code, matched_rule, category, source_log)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO events (timestamp, ip, method, url, status_code, matched_rule, category, source_log, country)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 event.timestamp.timestamp(),
                 event.ip,
@@ -134,7 +153,7 @@ class StorageManager:
                 event.status_code,
                 event.matched_rule,
                 event.category,
-                event.source_log
+                event.source_log, getattr(event, "country", "??")
             ))
             conn.commit()
 

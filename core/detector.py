@@ -7,6 +7,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 
 from core.config import ConfigManager
 from core.models import AttackEvent, Rule
+from core.geoip import geoip_lookup
 
 
 class AttackDetector:
@@ -93,6 +94,7 @@ class AttackDetector:
                     category=rule.category,
                     raw_line=raw_line,
                     source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
                 )
                 # If rule is critical, host is already banned, or status is 404/403/500, ban immediately!
                 if rule.critical or is_banned or status_code in (404, 403):
@@ -111,6 +113,7 @@ class AttackDetector:
                 category="repeat_attack",
                 raw_line=raw_line,
                 source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
             )
             return event, True, f"Repeat Attack from Banned IP ({status_code})"
 
@@ -148,6 +151,7 @@ class AttackDetector:
                     category="forbidden",
                     raw_line=raw_line,
                     source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
                 )
                 reason = f"HTTP 403 Forbidden ({count} hit{'s' if count > 1 else ''})"
                 history.clear()
@@ -162,6 +166,7 @@ class AttackDetector:
                     category="probe",
                     raw_line=raw_line,
                     source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
                 )
                 return event, False, ""
 
@@ -191,6 +196,7 @@ class AttackDetector:
                     category="rate_limit",
                     raw_line=raw_line,
                     source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
                 )
                 reason = f"Exceeded 404 limit: {count} hits in {self.config.window_seconds}s"
                 history.clear()
@@ -205,6 +211,7 @@ class AttackDetector:
                     category="probe",
                     raw_line=raw_line,
                     source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
                 )
                 return event, False, ""
 
