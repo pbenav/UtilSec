@@ -308,7 +308,7 @@ class SentinelTUI:
             reason_w = max(22, split_x - 46)
             ip_w = max(18, min(24, split_x // 5))  # Give IP a bit more space if wide
             
-            tbl_hdr = f"  {'TARGET/SUBNET':<{ip_w}} {'REASON/RULE':<{reason_w}} {'HITS':<5} {'TTL':<8} {'STATUS':<8}"
+            tbl_hdr = f"  {'TARGET/SUBNET':<{ip_w+4}} {'REASON/RULE':<{reason_w}} {'HITS':<5} {'TTL':<8} {'STATUS':<8}"
             stdscr.addstr(5, 1, tbl_hdr[: split_x - 1], curses.color_pair(self.C_DEFAULT) | curses.A_UNDERLINE)
 
             # Draw Banned IPs Table
@@ -339,7 +339,9 @@ class SentinelTUI:
                     if len(rule_disp) > reason_w:
                         rule_disp = rule_disp[:reason_w-2] + ".."
                     
-                    line_str = f" {ban.ip:<{ip_w}} {rule_disp:<{reason_w}} {ban.attack_count:<5} {rem:<8} {ban.status:<8}"
+                    c_code = getattr(ban, "country", "??")
+                    display_ip = f"[{c_code}] {ban.ip}"
+                    line_str = f" {display_ip:<{ip_w+4}} {rule_disp:<{reason_w}} {ban.attack_count:<5} {rem:<8} {ban.status:<8}"
                     line_str = line_str[: split_x - 1].ljust(split_x - 1)
 
                     attr = curses.A_REVERSE if is_sel else curses.A_NORMAL
@@ -401,7 +403,8 @@ class SentinelTUI:
                     y = 6 + row_i
                     t_str = ev.timestamp.strftime("%H:%M:%S")
                     src_tag = f"[{ev.source_log}] " if is_global and ev.source_log and ev.source_log != "default" else ""
-                    txt = f"{t_str} {src_tag}[{ev.ip}] {ev.method} {ev.url}"
+                    c_code = getattr(ev, "country", "??")
+                    txt = f"{t_str} {src_tag}[{c_code}] {ev.ip} {ev.method} {ev.url}"
                     tag = f"({ev.matched_rule})"
                     if len(txt) + len(tag) + 2 > stream_w:
                         txt = txt[: max(10, stream_w - len(tag) - 3)] + ".."
