@@ -154,16 +154,7 @@ class SentinelTUI:
             try:
                 max_y, max_x = stdscr.getmaxyx()
                 if max_y < 16 or max_x < 70:
-                    stdscr.clear()
-                    msg = f"Term too small ({max_x}x{max_y}). Min 70x16."
-                    safe_len = max(0, max_x - 1)
-                    if safe_len > 0:
-                        try:
-                            stdscr.addstr(0, 0, msg[:safe_len], curses.color_pair(self.C_WARN))
-                        except curses.error:
-                            pass
-                    stdscr.refresh()
-                    time.sleep(0.2)
+                    self._draw_too_small(stdscr, max_y, max_x)
                     key = stdscr.getch()
                     if key in (ord("q"), ord("Q")):
                         break
@@ -179,9 +170,38 @@ class SentinelTUI:
                     self._handle_key(stdscr, key)
 
             except curses.error:
-                pass
+                # A layout did not fit the current terminal size: tell the user
+                # instead of leaving the screen half drawn or aborting the UI.
+                try:
+                    max_y, max_x = stdscr.getmaxyx()
+                    self._draw_too_small(stdscr, max_y, max_x)
+                except curses.error:
+                    pass
+
+    def _draw_too_small(self, stdscr, max_y: int, max_x: int) -> None:
+        """Minimal, allocation-free hint shown when the terminal is too small."""
+        try:
+            stdscr.erase()
+            lines = [
+                "Terminal too small.",
+                f"Size: {max_x}x{max_y} - minimum is 70x16.",
+                "Resize the window and press any key.",
+                "[Q]uit",
+            ]
+            for i, line in enumerate(lines[: max(0, max_y)]):
+                try:
+                    stdscr.addstr(i, 0, line[: max(0, max_x - 1)], curses.color_pair(self.C_WARN))
+                except curses.error:
+                    break
+            stdscr.refresh()
+        except curses.error:
+            pass
 
     def _draw_dashboard(self, stdscr, max_y: int, max_x: int) -> None:
+        if max_y < 16 or max_x < 70:
+            self._draw_too_small(stdscr, max_y, max_x)
+            return
+
         stdscr.erase()
 
         screens = self.get_screens()
@@ -378,13 +398,20 @@ class SentinelTUI:
                 for y in range(4, max_y - 3):
                     stdscr.addstr(y, split_x, "│", curses.color_pair(self.C_MUTED))
 
+            # The right pane can be arbitrarily narrow (small terminal, long
+            # rule names). Never build a format specifier from a negative
+            # width: f"{x:<-5}" raises ValueError and kills the whole UI.
+            if stream_w <= 0:
+                stream_w = 0
+
             # Stream Header showing current monitored log name
-            if is_global:
-                stream_title = " LIVE ATTACK STREAM [GLOBAL - ALL LOGS] "
-            else:
-                log_disp = os.path.basename(w.log_path) if w else current_screen["name"]
-                stream_title = f" LIVE ATTACK STREAM ── [{log_disp}] "
-            stdscr.addstr(4, start_x, stream_title[:stream_w], curses.color_pair(self.C_INFO) | curses.A_BOLD)
+            if stream_w:
+                if is_global:
+                    stream_title = " LIVE ATTACK STREAM [GLOBAL - ALL LOGS] "
+                else:
+                    log_disp = os.path.basename(w.log_path) if w else current_screen["name"]
+                    stream_title = f" LIVE ATTACK STREAM ── [{log_disp}] "
+                stdscr.addstr(4, start_x, stream_title[:stream_w], curses.color_pair(self.C_INFO) | curses.A_BOLD)
 
             if is_global:
                 attacks_to_show = list(self.recent_attacks)[:table_h]
@@ -397,7 +424,11 @@ class SentinelTUI:
                     if is_global
                     else f"Waiting for attack events in {current_screen['name']}..."
                 )
-                stdscr.addstr(7, start_x, empty_msg, curses.color_pair(self.C_MUTED))
+                if stream_w:
+                    try:
+                        stdscr.addstr(7, start_x, empty_msg[:stream_w], curses.color_pair(self.C_MUTED))
+                    except curses.error:
+                        pass
             else:
                 for row_i, ev in enumerate(attacks_to_show):
                     y = 6 + row_i
@@ -406,9 +437,21 @@ class SentinelTUI:
                     c_code = getattr(ev, "country", "??")
                     txt = f"{t_str} {src_tag}[{c_code}] {ev.ip} {ev.method} {ev.url}"
                     tag = f"({ev.matched_rule})"
+                    if stream_w <= 0:
+                        continue
                     if len(txt) + len(tag) + 2 > stream_w:
-                        txt = txt[: max(10, stream_w - len(tag) - 3)] + ".."
-                    disp = f"{txt:<{stream_w - len(tag) - 1}} {tag}"[:stream_w]
+                        keep = stream_w - len(tag) - 3
+                        if keep >= 10:
+                            txt = txt[:keep] + ".."
+                        else:
+                            # Not enough room for the rule tag: drop it.
+                            tag = ""
+                            txt = txt[: max(0, stream_w - 2)]
+                    if tag and len(txt) + len(tag) + 1 <= stream_w:
+                        pad = " " * (stream_w - len(tag) - len(txt))
+                        disp = (txt + pad + tag)[:stream_w]
+                    else:
+                        disp = txt[:stream_w]
                     color = (
                         self.C_ALERT
                         if ev.category in (
@@ -1586,6 +1629,10 @@ class SentinelTUI:
 
     def _draw_stats_screen(self, stdscr, max_y: int, max_x: int) -> None:
         """Draws the dedicated statistics screen with responsive layout."""
+        if max_y < 16 or max_x < 70:
+            self._draw_too_small(stdscr, max_y, max_x)
+            return
+
         stdscr.erase()
 
         # Header
