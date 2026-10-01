@@ -165,8 +165,14 @@ class AttackDetector:
                 )
                 return event, False, ""
 
+        # Check if the URL requested is a static asset (to avoid false 404s for fallback-routed images)
+        is_static_asset = False
+        url_lower = url.lower()
+        if any(ext in url_lower for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".ico", ".css", ".js", ".svg", ".woff", ".ttf"]):
+            is_static_asset = True
+
         # 3. HTTP 404 Not Found Rate Limiting (Default: Strict threshold of 2 attempts)
-        if status_code == 404 and not is_crawler:
+        if status_code == 404 and not is_crawler and not is_static_asset:
             history = self.ip_404_history[ip]
             cutoff = now - self.config.window_seconds
             while history and history[0] < cutoff:
