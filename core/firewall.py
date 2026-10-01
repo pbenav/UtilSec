@@ -1507,3 +1507,8 @@ class FirewallManager:
 
     def stop(self) -> None:
         self.running = False
+        try:
+            if hasattr(self, 'backend'):
+                self.backend.exec_flush()
+        except Exception as e:
+            logger.error("Error flushing firewall rules on stop: %s", e)

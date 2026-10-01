@@ -25,6 +25,9 @@ class FirewallBackend:
     def exec_unban(self, ip: str) -> None:
         raise NotImplementedError()
 
+    def exec_flush(self) -> None:
+        raise NotImplementedError()
+
 
 class DryRunBackend(FirewallBackend):
     def ensure_whitelist_rules(self) -> int:
@@ -36,6 +39,9 @@ class DryRunBackend(FirewallBackend):
 
     def exec_unban(self, ip: str) -> None:
         logger.info("[DRY-RUN] Unban would be applied for %s", ip)
+
+    def exec_flush(self) -> None:
+        logger.info("[DRY-RUN] Would flush all firewall rules")
 
 
 class IptablesBackend(FirewallBackend):
@@ -84,3 +90,15 @@ class IptablesBackend(FirewallBackend):
             logger.info("Removed iptables DROP for %s", ip)
         except Exception as e:
             logger.error("Failed to remove iptables ban for %s: %s", ip, e)
+
+    def exec_flush(self) -> None:
+        if self.dry_run:
+            logger.info("[DRY-RUN] Would flush iptables UTILSEC-BAN chain")
+            return
+        try:
+            is_root = os.geteuid() == 0
+            prefix = [] if is_root else ["sudo", "-n"]
+            subprocess.run(prefix + ["iptables", "-w", "5", "-F", "UTILSEC-BAN"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            logger.info("Flushed all rules from UTILSEC-BAN chain.")
+        except Exception as e:
+            logger.error("Failed to flush iptables chain: %s", e)
