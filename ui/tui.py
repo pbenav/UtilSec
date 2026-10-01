@@ -135,16 +135,33 @@ class SentinelTUI:
             pass
 
     def _main_loop(self, stdscr) -> None:
-        curses.curs_set(0)
+        try:
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+        except curses.error:
+            pass  # Some terminals don't support hiding the cursor
+            
         stdscr.timeout(100)  # 100ms refresh rate
-        self._init_colors()
+        
+        try:
+            self._init_colors()
+        except curses.error:
+            pass  # Fallback if terminal colors fail to init
 
         while self.running:
             try:
                 max_y, max_x = stdscr.getmaxyx()
                 if max_y < 16 or max_x < 70:
                     stdscr.clear()
-                    stdscr.addstr(0, 0, f"Terminal too small ({max_x}x{max_y}). Min: 70x16.", curses.color_pair(self.C_WARN))
+                    msg = f"Term too small ({max_x}x{max_y}). Min 70x16."
+                    safe_len = max(0, max_x - 1)
+                    if safe_len > 0:
+                        try:
+                            stdscr.addstr(0, 0, msg[:safe_len], curses.color_pair(self.C_WARN))
+                        except curses.error:
+                            pass
                     stdscr.refresh()
                     time.sleep(0.2)
                     key = stdscr.getch()
@@ -497,7 +514,10 @@ class SentinelTUI:
         status_err = ""
 
         stdscr.timeout(-1)  # blocking input for modal
-        curses.curs_set(0)
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
 
         while True:
             max_y, max_x = stdscr.getmaxyx()
@@ -1476,7 +1496,10 @@ class SentinelTUI:
         """Displays an inline input prompt in the status bar."""
         max_y, max_x = stdscr.getmaxyx()
         curses.echo()
-        curses.curs_set(1)
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
 
         stdscr.attron(curses.color_pair(self.C_WARN) | curses.A_BOLD)
         stdscr.addstr(max_y - 2, 0, " " * (max_x - 1))
@@ -1509,7 +1532,10 @@ class SentinelTUI:
             stdscr.refresh()
 
         curses.noecho()
-        curses.curs_set(0)
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
         stdscr.timeout(100)
         return "".join(buf).strip()
 
