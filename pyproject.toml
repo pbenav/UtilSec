@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "utilsec-sentinel"
+version = "1.0.0"
+description = "Real-time web server attack monitor and firewall auto-ban with an interactive TUI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Sientia Open Source Labs" },
+]
+keywords = [
+    "security",
+    "firewall",
+    "waf",
+    "intrusion-detection",
+    "log-monitoring",
+    "iptables",
+    "nftables",
+    "ufw",
+    "tui",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console :: Curses",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: System :: Networking :: Firewalls",
+    "Topic :: System :: Systems Administration",
+]
+
+# Standard library only (curses, sqlite3, urllib); nothing to install at runtime.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/pbenav/UtilSec"
+Repository = "https://github.com/pbenav/UtilSec"
+Issues = "https://github.com/pbenav/UtilSec/issues"
+
+[project.scripts]
+utilsec-sentinel = "sentinel:main"
+
+[tool.setuptools]
+# Sentinel is a runnable module (`python3 sentinel.py`), not a package.
+py-modules = ["sentinel"]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+include = ["core*", "ui*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
