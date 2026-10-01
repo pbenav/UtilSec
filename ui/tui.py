@@ -436,18 +436,6 @@ class SentinelTUI:
         stdscr.addstr(max_y - 3, 0, "─" * (max_x - 1), curses.color_pair(self.C_MUTED))
 
 
-        y += 1
-        # 4. GeoLocalizacion
-        geo = data.get("geolocation", [])
-        if geo and y <= end_y - 2:
-            stdscr.addstr(y, 1, "── GEOLOCALIZACIÓN ──────────────────────────────────────"[:max_w], curses.color_pair(self.C_INFO) | curses.A_BOLD)
-            y += 1
-            for country, count, pct, ips in geo[: min(5, end_y - y)]:
-                c_tag = "Otros" if country == "XX" else country
-                line = f"  {c_tag:<6s} {count:>6d}  {pct:>6.1f}%"
-                stdscr.addstr(y, 1, line[:max_w], self.C_WARN)
-                y += 1
-
         # Status Line (Line max_y - 2)
         stdscr.addstr(max_y - 2, 1, f"STATUS: {self.status_msg}"[: max_x - 2], curses.color_pair(self.C_INFO))
 
