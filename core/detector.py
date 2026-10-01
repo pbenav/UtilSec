@@ -114,8 +114,22 @@ class AttackDetector:
             )
             return event, True, f"Repeat Attack from Banned IP ({status_code})"
 
+        # Check if the request comes from a known legitimate crawler
+        # We do this by checking the User-Agent in the raw log line.
+        # Spiders frequently generate 404s/403s during normal crawling.
+        # They will still be caught by the critical exploit rules above.
+        is_crawler = False
+        crawler_signatures = [
+            "googlebot", "bingbot", "yandexbot", "ahrefsbot", "mj12bot", 
+            "petalbot", "semrushbot", "slurp", "duckduckbot", "baiduspider", 
+            "facebookexternalhit", "twitterbot", "linkedinbot", "applebot", "crawler", "spider"
+        ]
+        raw_lower = raw_line.lower()
+        if any(bot in raw_lower for bot in crawler_signatures):
+            is_crawler = True
+
         # 2. HTTP 403 Forbidden Access Handling (Default: Instant ban on 1st attempt!)
-        if status_code == 403:
+        if status_code == 403 and not is_crawler:
             history = self.ip_403_history[ip]
             cutoff = now - self.config.window_seconds
             while history and history[0] < cutoff:
@@ -152,7 +166,7 @@ class AttackDetector:
                 return event, False, ""
 
         # 3. HTTP 404 Not Found Rate Limiting (Default: Strict threshold of 2 attempts)
-        if status_code == 404:
+        if status_code == 404 and not is_crawler:
             history = self.ip_404_history[ip]
             cutoff = now - self.config.window_seconds
             while history and history[0] < cutoff:
