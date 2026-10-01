@@ -234,10 +234,8 @@ class AttackAnalytics:
         missing_ips: List[str] = []
 
         for ip, count, pct in top_ips:
-            code = self._get_cached_geo(ip)
-            if code is None:
-                code = "XX"
-                missing_ips.append(ip)
+            from core.geoip import geoip_lookup
+            code = geoip_lookup.get_country(ip)
 
             if code not in country_data:
                 country_data[code] = {"count": 0, "ips": []}
@@ -246,8 +244,7 @@ class AttackAnalytics:
                 country_data[code]["ips"].append(ip)
 
         # Trigger background resolution for missing IPs without blocking
-        if missing_ips:
-            self._queue_geo_lookups(missing_ips)
+
 
         total = sum(d["count"] for d in country_data.values())
         result = [

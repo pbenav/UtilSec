@@ -220,10 +220,15 @@ class TestStartupSync(unittest.TestCase):
         finally:
             fw.stop()
 
-    def test_orphan_rule_without_db_row_is_left_alone(self):
+    def test_orphan_rule_without_db_row_is_adopted(self):
         self.fw._scan_utilsec_rules = lambda: [self._rule("5.5.5.0/24")]
         self.fw._sync_bans_with_firewall()
-        self.assertNotIn("5.5.5.0/24", self.fw.active_bans)
+        self.assertIn("5.5.5.0/24", self.fw.active_bans)
+        adopted = self.fw.active_bans["5.5.5.0/24"]
+        self.assertEqual(adopted.ban_duration, 0)
+        persisted = self.storage.load_active_bans()
+        self.assertIn("5.5.5.0/24", persisted)
+        self.assertEqual(persisted["5.5.5.0/24"].ban_duration, 0)
 
     def test_get_firewall_rules_still_hides_utilsec_rules(self):
         """The [U] panel must keep showing only *external* rules."""

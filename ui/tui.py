@@ -135,16 +135,33 @@ class SentinelTUI:
             pass
 
     def _main_loop(self, stdscr) -> None:
-        curses.curs_set(0)
+        try:
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+        except curses.error:
+            pass  # Some terminals don't support hiding the cursor
+            
         stdscr.timeout(100)  # 100ms refresh rate
-        self._init_colors()
+        
+        try:
+            self._init_colors()
+        except curses.error:
+            pass  # Fallback if terminal colors fail to init
 
         while self.running:
             try:
                 max_y, max_x = stdscr.getmaxyx()
                 if max_y < 16 or max_x < 70:
                     stdscr.clear()
-                    stdscr.addstr(0, 0, f"Terminal too small ({max_x}x{max_y}). Min: 70x16.", curses.color_pair(self.C_WARN))
+                    msg = f"Term too small ({max_x}x{max_y}). Min 70x16."
+                    safe_len = max(0, max_x - 1)
+                    if safe_len > 0:
+                        try:
+                            stdscr.addstr(0, 0, msg[:safe_len], curses.color_pair(self.C_WARN))
+                        except curses.error:
+                            pass
                     stdscr.refresh()
                     time.sleep(0.2)
                     key = stdscr.getch()
@@ -286,7 +303,12 @@ class SentinelTUI:
 
             # Left Header: Banned IPs
             stdscr.addstr(4, 2, " BANNED SUBNETS / ATTACKERS ", curses.color_pair(self.C_ALERT) | curses.A_BOLD)
-            tbl_hdr = f"  {'TARGET/SUBNET':<18} {'REASON/RULE':<22} {'HITS':<5} {'TTL':<8} {'STATUS':<8}"
+            
+            # Dynamic widths
+            reason_w = max(22, split_x - 46)
+            ip_w = max(18, min(24, split_x // 5))  # Give IP a bit more space if wide
+            
+            tbl_hdr = f"  {'TARGET/SUBNET':<{ip_w+4}} {'REASON/RULE':<{reason_w}} {'HITS':<5} {'TTL':<8} {'STATUS':<8}"
             stdscr.addstr(5, 1, tbl_hdr[: split_x - 1], curses.color_pair(self.C_DEFAULT) | curses.A_UNDERLINE)
 
             # Draw Banned IPs Table
@@ -310,14 +332,29 @@ class SentinelTUI:
                     is_sel = abs_i == self.selected_idx
 
                     rem = f"{ban.remaining_seconds}s" if ban.ban_duration > 0 else "PERM"
-                    rule_disp = ban.reason[:22]
-                    if len(ban.reason) > 22:
-                        rule_disp += ".."
-                    line_str = f" {ban.ip:<18} {rule_disp:<22} {ban.attack_count:<5} {rem:<8} {ban.status:<8}"
+                    reason_w = max(22, split_x - 46)
+                    ip_w = max(18, min(24, split_x // 5))
+                    
+                    rule_disp = ban.reason
+                    if len(rule_disp) > reason_w:
+                        rule_disp = rule_disp[:reason_w-2] + ".."
+                    
+                    c_code = getattr(ban, "country", "??")
+                    display_ip = f"[{c_code}] {ban.ip}"
+                    line_str = f" {display_ip:<{ip_w+4}} {rule_disp:<{reason_w}} {ban.attack_count:<5} {rem:<8} {ban.status:<8}"
                     line_str = line_str[: split_x - 1].ljust(split_x - 1)
 
                     attr = curses.A_REVERSE if is_sel else curses.A_NORMAL
-                    color = self.C_ALERT if ban.status == "BANNED" else self.C_WARN
+                    # If the ban target is actually in the whitelist, highlight in green
+                    try:
+                        is_whitelisted_ban = self.config.is_ip_whitelisted(ban.ip)
+                    except Exception:
+                        is_whitelisted_ban = False
+
+                    if is_whitelisted_ban:
+                        color = self.C_SUCCESS
+                    else:
+                        color = self.C_ALERT if ban.status == "BANNED" else self.C_WARN
                     if is_sel:
                         stdscr.addstr(y, 1, line_str, curses.color_pair(color) | attr | curses.A_BOLD)
                     else:
@@ -366,7 +403,8 @@ class SentinelTUI:
                     y = 6 + row_i
                     t_str = ev.timestamp.strftime("%H:%M:%S")
                     src_tag = f"[{ev.source_log}] " if is_global and ev.source_log and ev.source_log != "default" else ""
-                    txt = f"{t_str} {src_tag}[{ev.ip}] {ev.method} {ev.url}"
+                    c_code = getattr(ev, "country", "??")
+                    txt = f"{t_str} {src_tag}[{c_code}] {ev.ip} {ev.method} {ev.url}"
                     tag = f"({ev.matched_rule})"
                     if len(txt) + len(tag) + 2 > stream_w:
                         txt = txt[: max(10, stream_w - len(tag) - 3)] + ".."
@@ -379,10 +417,24 @@ class SentinelTUI:
                         )
                         else self.C_WARN
                     )
-                    stdscr.addstr(y, start_x, disp, curses.color_pair(color))
+                    # If the attacker IP is whitelisted, show in green so operator can spot overblocking
+                    try:
+                        # Normalize IP to strip ports or brackets (e.g. '1.2.3.4:54321' -> '1.2.3.4')
+                        from core.utils import normalize_ip
+
+                        n_ip = normalize_ip(ev.ip) or ev.ip
+                        is_whitelisted = self.config.is_ip_whitelisted(n_ip)
+                    except Exception:
+                        is_whitelisted = False
+
+                    if is_whitelisted:
+                        stdscr.addstr(y, start_x, disp, curses.color_pair(self.C_SUCCESS))
+                    else:
+                        stdscr.addstr(y, start_x, disp, curses.color_pair(color))
 
         # Separator before status bar
         stdscr.addstr(max_y - 3, 0, "─" * (max_x - 1), curses.color_pair(self.C_MUTED))
+
 
         # Status Line (Line max_y - 2)
         stdscr.addstr(max_y - 2, 1, f"STATUS: {self.status_msg}"[: max_x - 2], curses.color_pair(self.C_INFO))
@@ -466,7 +518,10 @@ class SentinelTUI:
         status_err = ""
 
         stdscr.timeout(-1)  # blocking input for modal
-        curses.curs_set(0)
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
 
         while True:
             max_y, max_x = stdscr.getmaxyx()
@@ -816,14 +871,25 @@ class SentinelTUI:
                 self.selected_idx += 1
 
         elif key == ord("u"):
-            # Unban currently selected IP from active list
+            # Prompt for IP to unban, defaulting to the selected one
             bans = self.firewall.get_active_bans_list()
+            default_ip = ""
             if bans and 0 <= self.selected_idx < len(bans):
-                target_ip = bans[self.selected_idx].ip
-                self.firewall.unban_ip(target_ip, manual=True)
-                self.set_status(f"Unbanned IP: {target_ip}")
+                default_ip = bans[self.selected_idx].ip
+                
+            prompt_str = f"Enter IP/Subnet to UNBAN [Default: {default_ip}]: " if default_ip else "Enter IP/Subnet to UNBAN: "
+            inp = self._prompt_input(stdscr, prompt_str)
+            
+            target_ip = inp.strip() if inp and inp.strip() else default_ip
+            
+            if target_ip:
+                success = self.firewall.unban_anywhere(target_ip)
+                if success:
+                    self.set_status(f"Unbanned IP/Subnet: {target_ip}")
+                else:
+                    self.set_status(f"Could not find or unban: {target_ip}")
             else:
-                self.set_status("No IP selected to unban.")
+                self.set_status("Unban cancelled.")
 
         elif key == ord("U"):
             # External rules panel: show fail2ban/manual rules and allow unban
@@ -1070,7 +1136,7 @@ class SentinelTUI:
                           border_line, curses.color_pair(self.C_INFO))
 
             # Column widths
-            col_ip = 18
+            col_ip = 23
             col_reason = 30
             col_status = 8
             col_hits = 5
@@ -1103,16 +1169,25 @@ class SentinelTUI:
                     reason_disp = ban.reason[:col_reason]
                     if len(ban.reason) > col_reason:
                         reason_disp += ".."
-                    line = f"  {list_idx + 1:>4}. {ban.ip:<{col_ip}} {reason_disp:<{col_reason}} {ban.attack_count:>{col_hits}}  {ban.status:<{col_status}}"
+                    c_code = getattr(ban, 'country', '??')
+                    disp_ip = f"[{c_code}] {ban.ip}"
+                    line = f"  {list_idx + 1:>4}. {disp_ip:<{col_ip}} {reason_disp:<{col_reason}} {ban.attack_count:>{col_hits}}  {ban.status:<{col_status}}"
                     if len(line) > modal_w - 2:
                         line = line[:modal_w - 4] + ".."
                     y = list_start_y + i
                     if 0 <= y < max_y - 1:
+                        # Use the same alignment for selected and unselected lines.
+                        # Previously the selected line was padded with extra spaces
+                        # which visually moved it to the right. Render the exact
+                        # line content and use attributes (reverse/bold) to highlight.
                         if list_idx == selected_idx:
-                            stdscr.addstr(y, start_x + 1, f" {line} ",
-                                          curses.color_pair(self.C_WARN) | curses.A_BOLD)
+                            attr = curses.A_REVERSE | curses.A_BOLD
+                            color = self.C_WARN
                         else:
-                            stdscr.addstr(y, start_x + 1, line, curses.color_pair(self.C_DEFAULT))
+                            attr = curses.A_NORMAL
+                            color = self.C_DEFAULT
+
+                        stdscr.addstr(y, start_x + 1, line, curses.color_pair(color) | attr)
 
             # Show scroll indicator
             if len(bans) > display_count:
@@ -1157,13 +1232,16 @@ class SentinelTUI:
                 selected_idx = 0
             elif ch == curses.KEY_END:
                 selected_idx = len(bans) - 1
-            elif ch in (10, 13, 27 - 64, curses.KEY_ENTER):
+            elif ch in (10, 13, curses.KEY_ENTER):
                 # Enter — unban selected IP
                 if bans:
                     target_ip = bans[selected_idx].ip
                     self.firewall.unban_ip(target_ip, manual=True)
                     self.status_msg = f"Unbanned: {target_ip}"
-                    break
+                    bans = self.firewall.get_active_bans_list()
+                    if selected_idx >= len(bans):
+                        selected_idx = max(0, len(bans) - 1)
+                    continue
             elif ch in (ord("m"), ord("M")):
                 # Manual input mode
                 stdscr.nodelay(False)
@@ -1231,8 +1309,8 @@ class SentinelTUI:
         prev_running = self.running
         prev_status = self.status_msg
 
-        # Get external firewall rules (fail2ban, manual)
-        fw_rules = self.firewall.get_firewall_rules()
+        # Get external firewall rules (fail2ban, manual) plus diagnostics
+        fw_rules, diagnostics = self.firewall.scan_external_rules_debug()
         selected_idx = 0
         scroll_offset = 0
 
@@ -1261,7 +1339,7 @@ class SentinelTUI:
                           border_line, curses.color_pair(self.C_INFO))
 
             # Column widths
-            col_ip = 18
+            col_ip = 23
             col_source = 12
             col_reason = 28
             col_rule = 5
@@ -1275,7 +1353,7 @@ class SentinelTUI:
             # Instructions
             instr_y = start_y + 4
             stdscr.addstr(instr_y, start_x + 2,
-                          "↑/↓ Navigate  Enter Unban  [Esc] Cancel  [F]ail2ban  [I]ptables",
+                          "↑/↓ Navigate  Enter Unban  [Esc] Cancel  [F]ail2ban  [I]ptables  [S]earch",
                           curses.color_pair(self.C_MUTED))
 
             # List rules with scroll
@@ -1317,6 +1395,12 @@ class SentinelTUI:
             if not fw_rules:
                 msg = "  No external firewall rules detected"
                 stdscr.addstr(list_start_y, start_x + 2, msg, curses.color_pair(self.C_MUTED))
+                # Show diagnostics lines below if any
+                dx = 0
+                for d in diagnostics[: (modal_h - 10) ]:
+                    if list_start_y + 2 + dx < start_y + modal_h - 2:
+                        stdscr.addstr(list_start_y + 2 + dx, start_x + 2, f"! {d}", curses.color_pair(self.C_WARN))
+                        dx += 1
 
             # Status hint
             hint_y = list_start_y + display_count + 1
@@ -1324,6 +1408,10 @@ class SentinelTUI:
                 stdscr.addstr(hint_y, start_x + 2,
                               f"Rules detected: {len(fw_rules)} (fail2ban/manual only)",
                               curses.color_pair(self.C_INFO))
+                # If there are diagnostics but rules exist, show a compact notice
+                if diagnostics:
+                    diag_msg = diagnostics[0][: (modal_w - 6)]
+                    stdscr.addstr(hint_y + 1, start_x + 2, f"! {diag_msg}", curses.color_pair(self.C_WARN))
 
             stdscr.refresh()
 
@@ -1349,7 +1437,7 @@ class SentinelTUI:
                 selected_idx = 0
             elif ch == curses.KEY_END:
                 selected_idx = len(fw_rules) - 1
-            elif ch in (10, 13, 27 - 64, curses.KEY_ENTER):
+            elif ch in (10, 13, curses.KEY_ENTER):
                 # Enter — unban selected rule
                 if fw_rules:
                     rule = fw_rules[selected_idx]
@@ -1397,6 +1485,16 @@ class SentinelTUI:
                         self.status_msg = f"Failed to remove rule for {rule.ip}"
                     # Refresh
                     fw_rules = self.firewall.get_firewall_rules()
+                elif ch in (ord("s"), ord("S")):
+                    # Search & unban by IP or subnet (operator input)
+                    inp = self._prompt_input(stdscr, "Enter IP or Subnet to search/unban (e.g. 1.2.3.4 or 1.2.3.0/24): ")
+                    if inp:
+                        ok = self.firewall.unban_anywhere(inp.strip())
+                        if ok:
+                            self.status_msg = f"Attempted removal of rules matching: {inp.strip()}"
+                        else:
+                            self.status_msg = f"No matching external rules found for: {inp.strip()}"
+                        fw_rules = self.firewall.get_firewall_rules()
 
         # Restore state
         self.status_msg = prev_status
@@ -1406,7 +1504,10 @@ class SentinelTUI:
         """Displays an inline input prompt in the status bar."""
         max_y, max_x = stdscr.getmaxyx()
         curses.echo()
-        curses.curs_set(1)
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
 
         stdscr.attron(curses.color_pair(self.C_WARN) | curses.A_BOLD)
         stdscr.addstr(max_y - 2, 0, " " * (max_x - 1))
@@ -1439,7 +1540,10 @@ class SentinelTUI:
             stdscr.refresh()
 
         curses.noecho()
-        curses.curs_set(0)
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
         stdscr.timeout(100)
         return "".join(buf).strip()
 
@@ -1726,3 +1830,15 @@ class SentinelTUI:
                 line = f"  {ip:<18s} {count:>6d}  {pct:>6.1f}%"
                 stdscr.addstr(y, 1, line[:max_w], self.C_ALERT)
                 y += 1
+        y += 1
+        # 4. GeoLocalizacion
+        geo = data.get("geolocation", [])
+        if geo and y <= end_y - 2:
+            stdscr.addstr(y, 1, "── GEOLOCALIZACIÓN ──────────────────────────────────────"[:max_w], curses.color_pair(self.C_INFO) | curses.A_BOLD)
+            y += 1
+            for country, count, pct, ips in geo[: min(5, end_y - y)]:
+                c_tag = "Otros" if country == "XX" else country
+                line = f"  {c_tag:<6s} {count:>6d}  {pct:>6.1f}%"
+                stdscr.addstr(y, 1, line[:max_w], self.C_WARN)
+                y += 1
+

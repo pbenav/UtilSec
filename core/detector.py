@@ -7,6 +7,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 
 from core.config import ConfigManager
 from core.models import AttackEvent, Rule
+from core.geoip import geoip_lookup
 
 # Rate-limit bookkeeping is bounded on purpose: a scanner rotating through
 # millions of source addresses would otherwise grow these dicts without limit.
@@ -122,6 +123,7 @@ class AttackDetector:
                     category=rule.category,
                     raw_line=raw_line,
                     source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
                 )
                 # If rule is critical, host is already banned, or status is 404/403/500, ban immediately!
                 if rule.critical or is_banned or status_code in (404, 403):
@@ -140,11 +142,26 @@ class AttackDetector:
                 category="repeat_attack",
                 raw_line=raw_line,
                 source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
             )
             return event, True, f"Repeat Attack from Banned IP ({status_code})"
 
+        # Check if the request comes from a known legitimate crawler
+        # We do this by checking the User-Agent in the raw log line.
+        # Spiders frequently generate 404s/403s during normal crawling.
+        # They will still be caught by the critical exploit rules above.
+        is_crawler = False
+        crawler_signatures = [
+            "googlebot", "bingbot", "yandexbot", "ahrefsbot", "mj12bot", 
+            "petalbot", "semrushbot", "slurp", "duckduckbot", "baiduspider", 
+            "facebookexternalhit", "twitterbot", "linkedinbot", "applebot", "crawler", "spider"
+        ]
+        raw_lower = raw_line.lower()
+        if any(bot in raw_lower for bot in crawler_signatures):
+            is_crawler = True
+
         # 2. HTTP 403 Forbidden Access Handling (Default: Instant ban on 1st attempt!)
-        if status_code == 403:
+        if status_code == 403 and not is_crawler:
             history = self.ip_403_history[ip]
             cutoff = now - self.config.window_seconds
             while history and history[0] < cutoff:
@@ -163,6 +180,7 @@ class AttackDetector:
                     category="forbidden",
                     raw_line=raw_line,
                     source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
                 )
                 reason = f"HTTP 403 Forbidden ({count} hit{'s' if count > 1 else ''})"
                 history.clear()
@@ -177,11 +195,18 @@ class AttackDetector:
                     category="probe",
                     raw_line=raw_line,
                     source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
                 )
                 return event, False, ""
 
+        # Check if the URL requested is a static asset (to avoid false 404s for fallback-routed images)
+        is_static_asset = False
+        url_lower = url.lower()
+        if any(ext in url_lower for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".ico", ".css", ".js", ".svg", ".woff", ".ttf"]):
+            is_static_asset = True
+
         # 3. HTTP 404 Not Found Rate Limiting (Default: Strict threshold of 2 attempts)
-        if status_code == 404:
+        if status_code == 404 and not is_crawler and not is_static_asset:
             history = self.ip_404_history[ip]
             cutoff = now - self.config.window_seconds
             while history and history[0] < cutoff:
@@ -200,6 +225,7 @@ class AttackDetector:
                     category="rate_limit",
                     raw_line=raw_line,
                     source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
                 )
                 reason = f"Exceeded 404 limit: {count} hits in {self.config.window_seconds}s"
                 history.clear()
@@ -214,6 +240,7 @@ class AttackDetector:
                     category="probe",
                     raw_line=raw_line,
                     source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
                 )
                 return event, False, ""
 

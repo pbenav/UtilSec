@@ -52,6 +52,14 @@ class LogWatcher:
         if m_err:
             raw_ip, err_msg = m_err.groups()
             ip = self._clean_ip(raw_ip)
+            
+            # Prevent false positives for images/static assets being served dynamically via fallback (e.g. WordPress, WebP Express).
+            # These generate "File does not exist" in the error log despite returning 200 OK to the client.
+            lower_msg = err_msg.lower()
+            if "file does not exist" in lower_msg or "script not found" in lower_msg:
+                if any(ext in lower_msg for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".ico", ".css", ".js", ".svg", ".woff"]):
+                    return None
+                    
             # Error logs represent failed requests / attack probes
             return ip, "ERR", err_msg, 404
 
@@ -181,7 +189,7 @@ class LogWatcher:
 class LogWatcherManager:
     """Manages multiple concurrent LogWatcher instances for multi-screen monitoring."""
 
-    def __init__(self, on_request: Callable[..., None], default_replay_lines: int = 100):
+    def __init__(self, on_request: Callable[..., None], default_replay_lines: int = 0):
         self.on_request = on_request
         self.default_replay_lines = default_replay_lines
         self.watchers: Dict[str, LogWatcher] = {}

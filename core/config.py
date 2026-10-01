@@ -2,6 +2,7 @@
 
 import ipaddress
 import json
+import logging
 import os
 import tempfile
 from typing import Any, Dict, List, Optional, Set, Union
@@ -43,15 +44,58 @@ class ConfigManager:
 
     def load(self) -> None:
         """Loads configuration from JSON file or sets defaults."""
+        # 1) Try given path as-is
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     self.raw_config = json.load(f)
+                logging.getLogger("UtilSec.Config").info("Loaded configuration from %s", self.config_path)
             except Exception as e:
-                print(f"[!] Error loading {self.config_path}: {e}. Using fallback defaults.")
+                logging.getLogger("UtilSec.Config").warning(
+                    "Error loading %s: %s. Using fallback defaults.", self.config_path, e
+                )
                 self.raw_config = {}
         else:
-            self.raw_config = {}
+            # 2) Try repo-relative path (useful when sentinel is started from another CWD)
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            alt_path = os.path.join(repo_root, self.config_path)
+            if os.path.exists(alt_path):
+                try:
+                    with open(alt_path, "r", encoding="utf-8") as f:
+                        self.raw_config = json.load(f)
+                    logging.getLogger("UtilSec.Config").info("Loaded configuration from %s", alt_path)
+                except Exception as e:
+                    logging.getLogger("UtilSec.Config").warning(
+                        "Error loading %s: %s. Using fallback defaults.", alt_path, e
+                    )
+                    self.raw_config = {}
+            else:
+                # 3) Try trailing .example next to requested path or repo root
+                example_path = f"{self.config_path}.example"
+                if os.path.exists(example_path):
+                    try:
+                        with open(example_path, "r", encoding="utf-8") as f:
+                            self.raw_config = json.load(f)
+                        logging.getLogger("UtilSec.Config").info("Loaded configuration from %s", example_path)
+                    except Exception as e:
+                        logging.getLogger("UtilSec.Config").warning(
+                            "Error loading %s: %s. Using fallback defaults.", example_path, e
+                        )
+                        self.raw_config = {}
+                else:
+                    example_repo = os.path.join(repo_root, f"{self.config_path}.example")
+                    if os.path.exists(example_repo):
+                        try:
+                            with open(example_repo, "r", encoding="utf-8") as f:
+                                self.raw_config = json.load(f)
+                            logging.getLogger("UtilSec.Config").info("Loaded configuration from %s", example_repo)
+                        except Exception as e:
+                            logging.getLogger("UtilSec.Config").warning(
+                                "Error loading %s: %s. Using fallback defaults.", example_repo, e
+                            )
+                            self.raw_config = {}
+                    else:
+                        self.raw_config = {}
 
         # Set default values if missing
         self.log_file = self.raw_config.get("log_file", "logs")
@@ -66,6 +110,12 @@ class ConfigManager:
                     self.log_files.append({"name": os.path.basename(item), "path": item})
         else:
             self.log_files.append({"name": os.path.basename(self.log_file), "path": self.log_file})
+
+        # Emit a concise log of loaded log_files for debugging/visibility
+        try:
+            logging.getLogger("UtilSec.Config").info("Configured log_files: %s", self.log_files)
+        except Exception:
+            pass
 
         self.firewall_backend = self.raw_config.get("firewall_backend", "auto")
         self.dry_run = self.raw_config.get("dry_run", True)
@@ -142,7 +192,7 @@ class ConfigManager:
                 if ip in net:
                     return True
         except ValueError:
-            return True  # If not a valid IP, ignore to prevent crashes
+            return False
         return False
 
     def get_ban_target(self, ip_str: str) -> str:
@@ -261,7 +311,7 @@ class ConfigManager:
             except OSError:
                 pass
         except Exception as e:
-            print(f"[!] Could not save configuration: {e}")
+            logging.getLogger("UtilSec.Config").error("Could not save configuration: %s", e)
         finally:
             if tmp_path:
                 try:

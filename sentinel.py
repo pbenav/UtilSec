@@ -11,6 +11,7 @@ import signal
 import sys
 import threading
 import time
+import fcntl
 
 from core.config import ConfigManager
 from core.detector import AttackDetector
@@ -57,7 +58,7 @@ def main():
     parser.add_argument("--ban-time", type=int, help="Ban duration in seconds")
     parser.add_argument("--threshold", type=int, help="Number of 404s within window to trigger ban (default: 2)")
     parser.add_argument("--threshold-403", type=int, help="Number of 403s within window to trigger ban (default: 1)")
-    parser.add_argument("--replay", type=int, default=100, help="Replay last N lines from existing log (default: 100 lines)")
+    parser.add_argument("--replay", type=int, default=0, help="Replay last N lines from existing log (default: 0 lines)")
     parser.add_argument("--headless", action="store_true", help="Run without TUI (headless/daemon console mode)")
     parser.add_argument("--subnet", dest="subnet", action="store_true", default=None, help="Ban /24 subnet instead of single IP (default)")
     parser.add_argument("--no-subnet", dest="subnet", action="store_false", help="Ban single IP address only")
@@ -65,11 +66,48 @@ def main():
 
     args = parser.parse_args()
 
+    # ==== Single-instance lock: ensure only one instance runs per machine ====
+    # Uses an exclusive non-blocking flock on a lock file in /tmp. If another
+    # process holds the lock, we notify and exit without modifying anything.
+    _lock_file_handle = None
+    def acquire_single_instance_lock(path: str = "/tmp/utilsec_sentinel.lock"):
+        nonlocal _lock_file_handle
+        try:
+            fh = open(path, "a+")
+        except Exception as e:
+            # If we cannot open the lock file, warn but allow startup (fallback)
+            print(f"Warning: could not open lock file {path}: {e}", file=sys.stderr)
+            return
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(
+                "Another instance of UtilSec Sentinel is already running on this machine. Exiting.",
+                file=sys.stderr,
+            )
+            try:
+                fh.close()
+            finally:
+                sys.exit(1)
+        except Exception as e:
+            # Unexpected flock error: warn and close, but allow startup
+            print(f"Warning: could not acquire lock on {path}: {e}", file=sys.stderr)
+            try:
+                fh.close()
+            finally:
+                return
+        # Keep file handle open for duration of process so lock is held
+        _lock_file_handle = fh
+
+    acquire_single_instance_lock()
+
     # 1. Setup storage first (needed for log config persistence)
     storage = StorageManager(db_path="sentinel_history.db")
 
     # 2. Load configuration
     config = ConfigManager(config_path=args.config)
+    logging.getLogger("UtilSec").info("Loaded config: %s", args.config)
+    logging.getLogger("UtilSec").info("Configured log files: %s", config.log_files)
     if args.log:
         config.log_files = []
         for entry in args.log:
@@ -161,7 +199,7 @@ def main():
                 if tui_ref[0]:
                     tui_ref[0].add_attack_event(event)
                 elif args.headless:
-                    print(f"[!] {event.summary()}")
+                    logger.warning("%s", event.summary())
 
                 if should_ban or already_banned:
                     target = config.get_ban_target(ip)
@@ -187,10 +225,11 @@ def main():
         if os.path.exists(item["path"]):
             valid_logs.append(item)
         else:
-            print(f"[!] Warning: Log file '{item['path']}' does not exist (skipping initially).")
+            logger = logging.getLogger("UtilSec")
+            logger.warning("Warning: Log file '%s' does not exist (skipping initially).", item["path"])
 
     if not valid_logs:
-        print(f"[!] Error: None of the configured log files exist! Please check your paths.")
+        logging.getLogger("UtilSec").error("Error: None of the configured log files exist! Please check your paths.")
         sys.exit(1)
 
     watcher_mgr = LogWatcherManager(
@@ -244,19 +283,20 @@ def main():
         active_bans = len(firewall.get_active_bans_list())
         fw_status = "SIMULATION (Dry-run)" if firewall.dry_run else f"LIVE ({firewall.active_backend.upper()})"
 
-        print("=" * 64)
-        print("  🛡️  UtilSec Sentinel - Servicio detenido correctamente")
-        print("=" * 64)
-        print(f"  • Estado Cortafuegos:    {fw_status}")
-        print(f"  • Subredes/IPs Baneadas:  {active_bans}")
-        print(f"  • Ataques Detectados:     {detector.total_attacks_detected}")
-        print(f"  • Líneas Analizadas:      {detector.total_analyzed:,}")
-        print(f"  • Logs Monitorizados:     {len(valid_logs)}")
-        print(f"  • Base de datos:          sentinel_history.db")
+        logger = logging.getLogger("UtilSec")
+        logger.info("%s", "=" * 64)
+        logger.info("  🛡️  UtilSec Sentinel - Servicio detenido correctamente")
+        logger.info("%s", "=" * 64)
+        logger.info("  • Estado Cortafuegos:    %s", fw_status)
+        logger.info("  • Subredes/IPs Baneadas:  %d", active_bans)
+        logger.info("  • Ataques Detectados:     %d", detector.total_attacks_detected)
+        logger.info("  • Líneas Analizadas:      %s", f"{detector.total_analyzed:,}")
+        logger.info("  • Logs Monitorizados:     %d", len(valid_logs))
+        logger.info("  • Base de datos:          sentinel_history.db")
         if firewall.dry_run and active_bans > 0:
-            print(f"  • Script de reglas:       banned_ips.sh")
-        print("=" * 64)
-        print("  ¡Sesión finalizada con éxito! Hasta pronto.\n")
+            logger.info("  • Script de reglas:       banned_ips.sh")
+        logger.info("%s", "=" * 64)
+        logger.info("  ¡Sesión finalizada con éxito! Hasta pronto.\n")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
@@ -272,19 +312,20 @@ def main():
             watcher_mgr.stop_all()
             firewall.stop()
             import traceback
-            print("\n[!] Se produjo un error en la interfaz TUI:")
+            logger.error("Se produjo un error en la interfaz TUI:")
             traceback.print_exc()
             sys.exit(1)
         else:
             shutdown()
     else:
-        print(f"[*] UtilSec Sentinel running in HEADLESS mode.")
-        print(f"[*] Watching {len(valid_logs)} log file(s):")
+        logger = logging.getLogger("UtilSec")
+        logger.info("[*] UtilSec Sentinel running in HEADLESS mode.")
+        logger.info("[*] Watching %d log file(s):", len(valid_logs))
         for item in valid_logs:
-            print(f"    - [{item['name']}] {item['path']}")
-        print(f"[*] Firewall: {'SIMULATION' if firewall.dry_run else firewall.active_backend.upper()}")
-        print(f"[*] Ban duration: {config.default_ban_duration}s | 404 Threshold: {config.threshold_404}")
-        print(f"[*] Press Ctrl+C to stop.\n")
+            logger.info("    - [%s] %s", item["name"], item["path"])
+        logger.info("[*] Firewall: %s", 'SIMULATION' if firewall.dry_run else firewall.active_backend.upper())
+        logger.info("[*] Ban duration: %ss | 404 Threshold: %d", config.default_ban_duration, config.threshold_404)
+        logger.info("[*] Press Ctrl+C to stop.")
 
         try:
             while True:

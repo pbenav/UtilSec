@@ -112,8 +112,8 @@ class StorageManager:
             conn = self._get_conn()
             conn.executemany(
                 """
-                INSERT INTO events (timestamp, ip, method, url, status_code, matched_rule, category, source_log)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO events (timestamp, ip, method, url, status_code, matched_rule, category, source_log, country)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -125,6 +125,7 @@ class StorageManager:
                         ev.matched_rule,
                         ev.category,
                         ev.source_log,
+                        getattr(ev, "country", "??"),
                     )
                     for ev in batch
                 ],
@@ -178,6 +179,24 @@ class StorageManager:
                 except sqlite3.Error:
                     pass
 
+            # Auto-migrate if country column does not exist in bans
+            cursor.execute("PRAGMA table_info(bans)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if "country" not in cols:
+                try:
+                    cursor.execute("ALTER TABLE bans ADD COLUMN country TEXT DEFAULT '??'")
+                except Exception:
+                    pass
+
+            # Auto-migrate if country column does not exist in events
+            cursor.execute("PRAGMA table_info(events)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if "country" not in cols:
+                try:
+                    cursor.execute("ALTER TABLE events ADD COLUMN country TEXT DEFAULT '??'")
+                except Exception:
+                    pass
+
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ip ON events (ip)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_time ON events (timestamp)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_src ON events (source_log)")
@@ -203,8 +222,8 @@ class StorageManager:
         with self._lock:
             conn = self._get_conn()
             conn.execute("""
-                INSERT INTO bans (ip, reason, matched_pattern, attack_count, banned_at, ban_duration, status, backend, last_url)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO bans (ip, reason, matched_pattern, attack_count, banned_at, ban_duration, status, backend, last_url, country)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(ip) DO UPDATE SET
                     reason=excluded.reason,
                     matched_pattern=excluded.matched_pattern,
@@ -213,10 +232,12 @@ class StorageManager:
                     ban_duration=excluded.ban_duration,
                     status=excluded.status,
                     backend=excluded.backend,
-                    last_url=excluded.last_url
+                    last_url=excluded.last_url,
+                    country=excluded.country
             """, (
                 ban.ip, ban.reason, ban.matched_pattern, ban.attack_count,
-                ban.banned_at, ban.ban_duration, ban.status, ban.backend, ban.last_url
+                ban.banned_at, ban.ban_duration, ban.status, ban.backend, ban.last_url,
+                getattr(ban, "country", "??")
             ))
             conn.commit()
 
@@ -231,8 +252,9 @@ class StorageManager:
         with self._lock:
             conn = self._get_conn()
             cursor = conn.execute(
-                "SELECT ip, reason, matched_pattern, attack_count, banned_at, ban_duration, status, backend, last_url "
-                "FROM bans WHERE status IN ('BANNED', 'SIMULATED')"
+                "SELECT ip, reason, matched_pattern, attack_count, banned_at, ban_duration, "
+                "status, backend, last_url, country FROM bans "
+                "WHERE status IN ('BANNED', 'SIMULATED')"
             )
             for row in cursor.fetchall():
                 ban = BanRecord(
@@ -245,6 +267,7 @@ class StorageManager:
                     status=row[6],
                     backend=row[7],
                     last_url=row[8],
+                    country=row[9] if len(row) > 9 else "??",
                 )
                 active_bans[ban.ip] = ban
         return active_bans
@@ -260,14 +283,14 @@ class StorageManager:
             conn = self._get_conn()
             if source_log:
                 cursor = conn.execute("""
-                    SELECT timestamp, ip, method, url, status_code, matched_rule, category, source_log
+                    SELECT timestamp, ip, method, url, status_code, matched_rule, category, source_log, country
                     FROM events
                     WHERE source_log = ?
                     ORDER BY id DESC LIMIT ?
                 """, (source_log, limit))
             else:
                 cursor = conn.execute("""
-                    SELECT timestamp, ip, method, url, status_code, matched_rule, category, source_log
+                    SELECT timestamp, ip, method, url, status_code, matched_rule, category, source_log, country
                     FROM events
                     ORDER BY id DESC LIMIT ?
                 """, (limit,))
@@ -280,7 +303,8 @@ class StorageManager:
                     status_code=row[4],
                     matched_rule=row[5],
                     category=row[6],
-                    source_log=row[7] if len(row) > 7 and row[7] else ""
+                    source_log=row[7] if len(row) > 7 and row[7] else "",
+                    country=row[8] if len(row) > 8 and row[8] else "??"
                 )
                 events.append(ev)
         return events

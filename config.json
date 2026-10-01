@@ -1,0 +1,150 @@
+{
+  "log_file": "logs",
+  "log_files": [
+    {
+      "name": "Extrarent",
+      "path": "/var/log/virtualmin/extrarent.com_access_log"
+    },
+    {
+      "name": "MCV",
+      "path": "/var/log/virtualmin/zafarraya.net_access_log"
+    },
+    {
+      "name": "Consigna",
+      "path": "/var/log/virtualmin/consignaibiza.com_access_log"
+    },
+    {
+      "name": "CTH",
+      "path": "/var/log/virtualmin/cth.sientia.com_access_log"
+    },
+    {
+      "name": "CV",
+      "path": "/var/log/virtualmin/cv.sientia.com_access_log"
+    },
+    {
+      "name": "Draw",
+      "path": "/var/log/virtualmin/draw.sientia.com_access_log"
+    },
+    {
+      "name": "ERP",
+      "path": "/var/log/virtualmin/erp.sientia.com_access_log"
+    },
+    {
+      "name": "FLT",
+      "path": "/var/log/virtualmin/flt.sientia.com_access_log"
+    },
+    {
+      "name": "GF",
+      "path": "/var/log/virtualmin/guadalinfo.zafarraya.net_access_log"
+    },
+    {
+      "name": "Movies",
+      "path": "/var/log/virtualmin/movies.sientia.com_access_log"
+    },
+    {
+      "name": "NCloud",
+      "path": "/var/log/virtualmin/nextcloud.sientia.com_access_log"
+    },
+    {
+      "name": "NodeR",
+      "path": "/var/log/virtualmin/nodered.sientia.com_access_log"
+    },
+    {
+      "name": "Sientia",
+      "path": "/var/log/virtualmin/sientia.com_access_log"
+    }
+  ],
+  "firewall_backend": "auto",
+  "dry_run": true,
+  "default_ban_duration": 1800,
+  "threshold_404": 4,
+  "threshold_403": 2,
+  "window_seconds": 60,
+  "ban_subnet": true,
+  "subnet_cidr_ipv4": 24,
+  "subnet_cidr_ipv6": 64,
+  "whitelist": [
+    "127.0.0.1",
+    "::1",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "185.204.62.36/32",
+    "92.187.27.165/32",
+    "90.166.55.0/25"
+  ],
+  "user_patterns": [
+    "/admin.php",
+    "/phpmyadmin",
+    "/pma",
+    "/wp-login.php",
+    "/xmlrpc.php",
+    "?start="
+  ],
+  "heuristic_rules": [
+    {
+      "id": "cloud_leaks",
+      "name": "Cloud & AI Credential Leak",
+      "pattern": "/\\.(aws|docker|kube|azure|claude|anthropic)(/|$)|/\\.config/(gcloud|anthropic|gh|op)(/|$)|\\.(boto|amplifyrc)",
+      "is_regex": true,
+      "critical": true,
+      "category": "credentials"
+    },
+    {
+      "id": "env_leaks",
+      "name": "Environment / Config Leaks",
+      "pattern": "\\.env([.~a-zA-Z0-9_-]+)?$|\\.aws/credentials|rclone\\.conf|\\.vscode/sftp\\.json|wp-config\\.php|\\.(esmtprc|netrc|dockercfg)",
+      "is_regex": true,
+      "critical": true,
+      "category": "credentials"
+    },
+    {
+      "id": "git_leaks",
+      "name": "Git Repository Leak",
+      "pattern": "\\.git([/._-]|$)|\\.gitignore|\\.gitconfig|\\.git-credentials|\\.DS_Store",
+      "is_regex": true,
+      "critical": true,
+      "category": "credentials"
+    },
+    {
+      "id": "webshells",
+      "name": "Known PHP WebShells & Backdoors",
+      "pattern": "(hellopress|wp_filemanager|this_is_a_new_hello_world|coffexium|alfa|cxs|wso|b374k|c99|r57|simattacker|c100)\\.php",
+      "is_regex": true,
+      "critical": true,
+      "category": "webshell"
+    },
+    {
+      "id": "traversal",
+      "name": "Path / Directory Traversal",
+      "pattern": "\\.\\./|\\.\\.%2f|@fs/|/etc/passwd|/proc/self",
+      "is_regex": true,
+      "critical": true,
+      "category": "traversal"
+    },
+    {
+      "id": "framework_exploits",
+      "name": "Framework & CVE Exploits",
+      "pattern": "actuator/|telescope/requests|debug/default/view|@vite/env|exporttool/microsoft\\.exchange|pom\\.properties|v2/_catalog|trace\\.axd|vendor/phpunit|solr/admin",
+      "is_regex": true,
+      "critical": true,
+      "category": "exploit"
+    },
+    {
+      "id": "cgi_exploit",
+      "name": "CGI-Bin Script Probe",
+      "pattern": "/cgi-bin/",
+      "is_regex": false,
+      "critical": true,
+      "category": "exploit"
+    },
+    {
+      "id": "param_fuzzing",
+      "name": "Parameter Injection & Bot Spam",
+      "pattern": "/\\?[a-zA-Z]=|/\\?[a-zA-Z]{3,}/[0-9]+|^/(shops|colombo|ittria|conglutinated|claimless|clapper)/|^/ip(/|\\.php)?$",
+      "is_regex": true,
+      "critical": true,
+      "category": "exploit"
+    }
+  ]
+}
