@@ -847,14 +847,25 @@ class SentinelTUI:
                 self.selected_idx += 1
 
         elif key == ord("u"):
-            # Unban currently selected IP from active list
+            # Prompt for IP to unban, defaulting to the selected one
             bans = self.firewall.get_active_bans_list()
+            default_ip = ""
             if bans and 0 <= self.selected_idx < len(bans):
-                target_ip = bans[self.selected_idx].ip
-                self.firewall.unban_ip(target_ip, manual=True)
-                self.set_status(f"Unbanned IP: {target_ip}")
+                default_ip = bans[self.selected_idx].ip
+                
+            prompt_str = f"Enter IP/Subnet to UNBAN [Default: {default_ip}]: " if default_ip else "Enter IP/Subnet to UNBAN: "
+            inp = self._prompt_input(stdscr, prompt_str)
+            
+            target_ip = inp.strip() if inp and inp.strip() else default_ip
+            
+            if target_ip:
+                success = self.firewall.unban_anywhere(target_ip)
+                if success:
+                    self.set_status(f"Unbanned IP/Subnet: {target_ip}")
+                else:
+                    self.set_status(f"Could not find or unban: {target_ip}")
             else:
-                self.set_status("No IP selected to unban.")
+                self.set_status("Unban cancelled.")
 
         elif key == ord("U"):
             # External rules panel: show fail2ban/manual rules and allow unban

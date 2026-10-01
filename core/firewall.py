@@ -171,9 +171,19 @@ class FirewallManager:
                     record = loaded[ip]
             
             if record is None:
-                # No storage record - this is an orphaned rule, leave it (user can clean it manually)
-                logger.info("[SYNC] Found orphaned firewall rule for %s (no storage record). Leaving in place.", ip)
-                continue
+                # No storage record - this is an orphaned rule. Adopt it so it's visible.
+                logger.info("[SYNC] Found orphaned firewall rule for %s (no storage record). Adopting it into memory.", ip)
+                record = BanRecord(
+                    ip=ip, 
+                    reason="Orphaned firewall rule (adopted by sync)", 
+                    matched_pattern="",
+                    attack_count=0, 
+                    banned_at=now, 
+                    ban_duration=0,
+                    backend=self.active_backend
+                )
+                if self.storage:
+                    self.storage.save_ban(record)
             
             # Check if TTL expired
             if record.ban_duration > 0 and now >= record.unban_at:
@@ -1159,16 +1169,35 @@ class FirewallManager:
         return ""
 
     def get_active_bans_list(self, sort_by_ip: bool = False) -> List[BanRecord]:
-        """Returns only the bans managed by Sentinel (active_bans).
-        
-        External firewall rules (fail2ban, manual) are NOT included here.
-        They are shown separately in the [U] panel via get_firewall_rules().
+        """Returns ALL bans: those managed by Sentinel AND external firewall rules.
         """
         with self.lock:
             result = list(self.active_bans.values())
-            if sort_by_ip:
-                return sorted(result, key=lambda r: ipaddress.ip_address(r.ip.split('/')[0]))
-            return sorted(result, key=lambda r: r.banned_at, reverse=True)
+            
+        # Also append external rules so the user sees EVERYTHING in the main list
+        external = self.get_firewall_rules()
+        for ext in external:
+            # Convert FirewallRuleInfo to a pseudo-BanRecord for display
+            br = BanRecord(
+                ip=ext.ip,
+                reason=f"External ({ext.source})",
+                matched_pattern="",
+                attack_count=0,
+                banned_at=0,  # Unknown time
+                ban_duration=0, # Permanent
+                backend=ext.backend
+            )
+            result.append(br)
+
+        if sort_by_ip:
+            # Safely parse IPs for sorting
+            def safe_ip(ip_str):
+                try:
+                    return ipaddress.ip_address(ip_str.split('/')[0])
+                except Exception:
+                    return ipaddress.ip_address('255.255.255.255')
+            return sorted(result, key=lambda r: safe_ip(r.ip))
+        return sorted(result, key=lambda r: r.banned_at, reverse=True)
 
     def get_firewall_rules(self) -> List[FirewallRuleInfo]:
         """Get all external firewall rules (fail2ban, manual) not managed by UtilSec.
@@ -1401,12 +1430,24 @@ class FirewallManager:
 
         Returns True if at least one removal succeeded.
         """
-        matches = self.find_rules_for(target)
-        if not matches:
-            logger.info("No external firewall rules matched %s", target)
+        any_success = False
+        target_clean = target.strip()
+        
+        # First check active_bans (Sentinel)
+        with self.lock:
+            if target_clean in self.active_bans:
+                any_success = True
+                
+        if any_success:
+            self.unban_ip(target_clean, manual=True)
+            
+        matches = self.find_rules_for(target_clean)
+        if not matches and not any_success:
+            logger.info("No firewall rules matched %s", target_clean)
             return False
 
-        any_success = False
+        # We do not reset any_success if it was already True
+        # any_success = False  (removed)
         for rule in matches:
             try:
                 if rule.source == "fail2ban":
