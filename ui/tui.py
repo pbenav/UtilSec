@@ -1892,6 +1892,7 @@ class SentinelTUI:
         msg = self._prompt_input(stdscr, "5. Breve mensaje de log (ej: Intento de XSS): ")
         if not msg: msg = "Regla WAF Personalizada UtilSec"
         
+        import random
         rule_id = random.randint(10000, 99999)
         rule_str = f"SecRule {var} \"{op} {val}\" \"id:{rule_id},phase:1,{action},msg:'UtilSec: {msg}'\""
         return rule_str
