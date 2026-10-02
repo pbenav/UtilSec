@@ -1546,7 +1546,7 @@ class SentinelTUI:
         self.status_msg = prev_status
         self.running = prev_running
 
-    def _prompt_input(self, stdscr, prompt: str) -> str:
+    def _prompt_input(self, stdscr, prompt: str, default_text: str = "") -> str:
         """Displays an inline input prompt in the status bar."""
         max_y, max_x = stdscr.getmaxyx()
         curses.echo()
@@ -1561,8 +1561,12 @@ class SentinelTUI:
         stdscr.attroff(curses.color_pair(self.C_WARN) | curses.A_BOLD)
         stdscr.refresh()
 
-        buf = []
+        buf = list(default_text) if default_text else []
         x_pos = len(prompt) + 1
+        if default_text:
+            stdscr.addstr(max_y - 2, x_pos, default_text)
+            x_pos += len(default_text)
+            stdscr.move(max_y - 2, x_pos)
         stdscr.timeout(-1)  # blocking for input
 
         while True:
@@ -1925,7 +1929,7 @@ class SentinelTUI:
                     stdscr.addstr(8 + i, 6, f"[{i}] {disp}", curses.color_pair(self.C_DEFAULT))
             
             stdscr.addstr(max_y - 4, 2, "────────────────────────────────────────────────────────", curses.color_pair(self.C_MUTED))
-            stdscr.addstr(max_y - 3, 2, " [N]ueva regla manual | [D]Borrar regla (índice) | [Q] Volver", curses.color_pair(self.C_INFO))
+            stdscr.addstr(max_y - 3, 2, " [N]ueva regla | [E]ditar | [D]Borrar | [Q] Volver", curses.color_pair(self.C_INFO))
             
             stdscr.refresh()
             k = stdscr.getch()
@@ -1950,6 +1954,21 @@ class SentinelTUI:
                     self.set_status(f"Regla WAF añadida con éxito.")
                 elif new_rule:
                     self.set_status("Directiva inválida (debe empezar por SecRule)")
+            elif k in (ord('e'), ord('E')):
+                idx_str = self._prompt_input(stdscr, "Índice de regla a editar: ")
+                if idx_str.isdigit():
+                    idx = int(idx_str)
+                    if 0 <= idx < len(rules):
+                        stdscr.erase()
+                        edited = self._prompt_input(stdscr, "Edita la regla: ", rules[idx])
+                        if edited and edited.startswith("SecRule"):
+                            waf_mgr.edit_custom_rule(idx, edited)
+                            rules = waf_mgr.get_custom_rules()
+                            self.set_status("Regla WAF editada.")
+                        else:
+                            self.set_status("Directiva inválida.")
+                    else:
+                        self.set_status("Índice incorrecto.")
             elif k in (ord('d'), ord('D')):
                 idx_str = self._prompt_input(stdscr, "Índice de regla a borrar: ")
                 if idx_str.isdigit():

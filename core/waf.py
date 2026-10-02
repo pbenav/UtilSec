@@ -75,4 +75,21 @@ class WafManager:
         except Exception:
             return False
 
+    def edit_custom_rule(self, idx: int, directive: str) -> bool:
+        rules = self.get_custom_rules()
+        if idx < 0 or idx >= len(rules):
+            return False
+            
+        rules[idx] = directive
+        try:
+            with open(self.conf_file, 'w') as f:
+                f.write("# UtilSec Custom WAF Rules\n\n")
+                for r in rules:
+                    f.write(f"{r}\n")
+            subprocess.run(["systemctl", "reload", "apache2"], capture_output=True)
+            return True
+        except Exception:
+            return False
+
+
 waf_mgr = WafManager()
