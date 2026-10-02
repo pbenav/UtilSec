@@ -1064,6 +1064,9 @@ class SentinelTUI:
             removed = self.firewall.clear_expired()
             self.set_status(f"Cleaned {removed} expired record(s) from display.")
 
+        elif key in (ord('w'), ord('W')):
+            self._show_waf_modal(stdscr)
+
         elif key in (ord("i"), ord("I")):
             # Show copyright / about modal
             self._show_about_modal(stdscr)
