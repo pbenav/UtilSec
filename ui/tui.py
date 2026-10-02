@@ -1919,6 +1919,48 @@ class SentinelTUI:
         rule_str = f"SecRule {var} \"{op} {val}\" \"id:{rule_id},phase:1,{action},msg:'UtilSec: {msg}'\""
         return rule_str
 
+
+    def _show_waf_help_modal(self, stdscr):
+        while True:
+            stdscr.erase()
+            max_y, max_x = stdscr.getmaxyx()
+            
+            title = " [ EJEMPLOS PRÁCTICOS DE REGLAS WAF ] "
+            stdscr.addstr(1, max(0, (max_x - len(title)) // 2), title, curses.color_pair(self.C_HEADER) | curses.A_BOLD)
+            
+            lines = [
+                ("1. Bloquear Escáneres de Vulnerabilidades (User-Agent):", self.C_INFO),
+                ('SecRule REQUEST_HEADERS:User-Agent "@rx (?i)(nikto|sqlmap|masscan|zgrab|nmap)" "id:10002,phase:1,drop,msg:\'Bot bloqueado\'"', self.C_DEFAULT),
+                ("", self.C_DEFAULT),
+                ("2. Bloquear LFI (Local File Inclusion / Path Traversal):", self.C_INFO),
+                ('SecRule REQUEST_URI|ARGS "@pm /etc/passwd /etc/shadow /proc/self/environ" "id:10003,phase:1,drop,msg:\'Intento LFI\'"', self.C_DEFAULT),
+                ("", self.C_DEFAULT),
+                ("3. Sellar paneles de administración (WordPress, phpMyAdmin):", self.C_INFO),
+                ('SecRule REQUEST_URI "@pm /wp-login.php /xmlrpc.php /pma" "id:10004,phase:1,drop,msg:\'Acceso denegado\'"', self.C_DEFAULT),
+                ("", self.C_DEFAULT),
+                ("4. Bloquear el 99% de las Inyecciones SQL básicas:", self.C_INFO),
+                ('SecRule ARGS|REQUEST_URI "@rx (?i)(union.+select|select.+from.+information_schema)" "id:10005,phase:1,drop,msg:\'SQLi\'"', self.C_DEFAULT),
+                ("", self.C_DEFAULT),
+                ("5. Bloquear una IP o subred de atacantes conocidos:", self.C_INFO),
+                ('SecRule REMOTE_ADDR "@ipMatch 192.168.1.100, 10.0.0.0/8" "id:10006,phase:1,drop,msg:\'IP Maliciosa\'"', self.C_DEFAULT)
+            ]
+            
+            for i, (text, color) in enumerate(lines):
+                if i + 3 < max_y - 3:
+                    # Truncate if too long to prevent wrap-around curses errors
+                    disp = text[:max_x - 4]
+                    if color == self.C_INFO:
+                        stdscr.addstr(3 + i, 2, disp, curses.color_pair(color) | curses.A_BOLD)
+                    else:
+                        stdscr.addstr(3 + i, 2, disp, curses.color_pair(color))
+                        
+            stdscr.addstr(max_y - 2, 2, " [ Puedes seleccionar este texto con el ratón para copiarlo ] ", curses.color_pair(self.C_WARN))
+            stdscr.addstr(max_y - 1, 2, " Pulsa cualquier tecla para volver... ", curses.color_pair(self.C_MUTED))
+            
+            stdscr.refresh()
+            stdscr.getch()
+            break
+
     def _show_waf_modal(self, stdscr):
         from core.waf import waf_mgr
         stdscr.erase()
@@ -1967,7 +2009,7 @@ class SentinelTUI:
                     stdscr.addstr(8 + i, 6, f"[{i}] {disp}", curses.color_pair(self.C_DEFAULT))
             
             stdscr.addstr(max_y - 4, 2, "────────────────────────────────────────────────────────", curses.color_pair(self.C_MUTED))
-            stdscr.addstr(max_y - 3, 2, " [N]ueva regla | [E]ditar | [D]Borrar | [Q] Volver", curses.color_pair(self.C_INFO))
+            stdscr.addstr(max_y - 3, 2, " [N]ueva | [E]ditar | [D]Borrar | [H] Ejemplos | [Q] Volver", curses.color_pair(self.C_INFO))
             
             stdscr.refresh()
             k = stdscr.getch()
@@ -1992,6 +2034,8 @@ class SentinelTUI:
                     self.set_status(f"Regla WAF añadida con éxito.")
                 elif new_rule:
                     self.set_status("Directiva inválida (debe empezar por SecRule)")
+            elif k in (ord('h'), ord('H'), ord('?')):
+                self._show_waf_help_modal(stdscr)
             elif k in (ord('e'), ord('E')):
                 idx_str = self._prompt_input(stdscr, "Índice de regla a editar: ")
                 if idx_str.isdigit():
