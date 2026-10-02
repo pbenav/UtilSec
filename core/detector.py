@@ -72,6 +72,15 @@ class AttackDetector:
         self.config.load()
         self._compile_rules()
 
+    def reset_counters(self) -> None:
+        """Reset all internal statistics counters."""
+        self.total_analyzed = 0
+        self.total_404s = 0
+        self.total_403s = 0
+        self.total_attacks_detected = 0
+        self.ip_404_history.clear()
+        self.ip_403_history.clear()
+
     def analyze_request(
         self,
         ip: str,
