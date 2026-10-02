@@ -483,7 +483,7 @@ class SentinelTUI:
         stdscr.addstr(max_y - 2, 1, f"STATUS: {self.status_msg}"[: max_x - 2], curses.color_pair(self.C_INFO))
 
         # Hotkeys Bar (Line max_y - 1)
-        help_bar = "[Q]uit [0-9/[]]Screen [Tab/V]iew [M]ode(Live/Sim) [u]nban [U]xternal Rules [-]Del [B]an [A]Rule [D]elRule [E]stats [P]ause [I]Info"
+        help_bar = "[Q]uit [0-9/[]]Screen [Tab/V]iew [M]ode [u]nban [U]xt [W]AF [-]Del [B]an [A]Rule [D]el [E]stats [P]ause [I]Info"
         stdscr.addstr(max_y - 1, 0, help_bar[: max_x - 1], curses.color_pair(self.C_HEADER) | curses.A_BOLD)
 
         # Watermark / branding in bottom-right corner
@@ -1823,6 +1823,60 @@ class SentinelTUI:
                     c_tag = "Otros" if country == "XX" else country
                     line = f"  {c_tag:<6s} {count:>6d}  {pct_str:>6s}  {ip_count} IPs"
                     stdscr.addstr(row_y, col2_x, line[:col2_w], self.C_WARN)
+
+
+    def _show_waf_modal(self, stdscr):
+        from core.waf import waf_mgr
+        stdscr.erase()
+        max_y, max_x = stdscr.getmaxyx()
+        
+        is_installed = waf_mgr.is_modsec_installed()
+        rules = waf_mgr.get_custom_rules()
+        
+        while True:
+            stdscr.erase()
+            title = " [ MODSECURITY WAF MANAGER ] "
+            stdscr.addstr(2, max(0, (max_x - len(title)) // 2), title, curses.color_pair(self.C_HEADER) | curses.A_BOLD)
+            
+            status_text = "INSTALADO Y ACTIVO" if is_installed else "NO DETECTADO O INACTIVO"
+            status_color = self.C_SUCCESS if is_installed else self.C_ALERT
+            stdscr.addstr(4, 4, f"Estado del motor WAF (Apache): ", curses.color_pair(self.C_INFO))
+            stdscr.addstr(4, 35, status_text, curses.color_pair(status_color))
+            
+            stdscr.addstr(6, 4, "Reglas Personalizadas (utilsec_custom.conf):", curses.color_pair(self.C_INFO) | curses.A_BOLD)
+            
+            if not rules:
+                stdscr.addstr(8, 6, "No hay reglas WAF personalizadas cargadas.", curses.color_pair(self.C_MUTED))
+            else:
+                for i, r in enumerate(rules[:15]):
+                    disp = (r[:max_x-15] + "..") if len(r) > max_x-15 else r
+                    stdscr.addstr(8 + i, 6, f"[{i}] {disp}", curses.color_pair(self.C_DEFAULT))
+            
+            stdscr.addstr(max_y - 4, 2, "────────────────────────────────────────────────────────", curses.color_pair(self.C_MUTED))
+            stdscr.addstr(max_y - 3, 2, " [N]ueva regla manual | [D]Borrar regla (índice) | [Q] Volver", curses.color_pair(self.C_INFO))
+            
+            stdscr.refresh()
+            k = stdscr.getch()
+            
+            if k in (ord('q'), ord('Q'), 27):
+                break
+            elif k in (ord('n'), ord('N')):
+                new_rule = self._prompt_string(stdscr, "Introduce directiva SecRule (ej: SecRule ARGS '@rx DROP TABLE' ...): ")
+                if new_rule and new_rule.startswith("SecRule"):
+                    waf_mgr.add_custom_rule(new_rule)
+                    rules = waf_mgr.get_custom_rules()
+                    self.set_status(f"Regla WAF añadida.", "success")
+                else:
+                    self.set_status("Directiva inválida (debe empezar por SecRule)", "error")
+            elif k in (ord('d'), ord('D')):
+                idx_str = self._prompt_string(stdscr, "Índice de regla a borrar: ")
+                if idx_str.isdigit():
+                    idx = int(idx_str)
+                    if waf_mgr.remove_custom_rule(idx):
+                        rules = waf_mgr.get_custom_rules()
+                        self.set_status("Regla WAF borrada", "success")
+                    else:
+                        self.set_status("Índice incorrecto", "error")
 
     def _draw_stats_1col(self, stdscr, data: dict, max_y: int, max_x: int) -> None:
         """Draws a responsive single-column statistics view for narrow terminals."""

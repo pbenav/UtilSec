@@ -171,6 +171,17 @@ class ConfigManager:
 
         # Heuristic rules
         heuristic_rules = self.raw_config.get("heuristic_rules", [])
+        # Inject WAF / ModSecurity rule automatically if not present
+        has_waf = any(h.get("id") == "modsecurity_waf" for h in heuristic_rules)
+        if not has_waf:
+            heuristic_rules.append({
+                "id": "modsecurity_waf",
+                "name": "WAF Block (ModSecurity / OWASP)",
+                "pattern": "ModSecurity: Access denied|ModSecurity: Warning",
+                "is_regex": True,
+                "critical": True,
+                "category": "exploit"
+            })
         for h in heuristic_rules:
             self.rules.append(
                 Rule(

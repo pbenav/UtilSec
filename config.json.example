@@ -93,6 +93,14 @@
       "is_regex": true,
       "critical": true,
       "category": "exploit"
+    },
+    {
+      "id": "modsecurity_waf",
+      "name": "WAF Block (ModSecurity / OWASP)",
+      "pattern": "ModSecurity: Access denied|ModSecurity: Warning",
+      "is_regex": true,
+      "critical": true,
+      "category": "exploit"
     }
   ]
 }
