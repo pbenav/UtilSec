@@ -1562,32 +1562,50 @@ class SentinelTUI:
         stdscr.refresh()
 
         buf = list(default_text) if default_text else []
-        x_pos = len(prompt) + 1
-        if default_text:
-            stdscr.addstr(max_y - 2, x_pos, default_text)
-            x_pos += len(default_text)
-            stdscr.move(max_y - 2, x_pos)
+        start_x = len(prompt) + 1
+        buf_idx = len(buf)
         stdscr.timeout(-1)  # blocking for input
+
+        def _redraw():
+            # Clear line from start_x to end
+            stdscr.addstr(max_y - 2, start_x, " " * (max_x - start_x - 1))
+            # Draw buffer
+            text = "".join(buf)
+            stdscr.addstr(max_y - 2, start_x, text[:max_x - start_x - 1])
+            # Move cursor
+            stdscr.move(max_y - 2, start_x + buf_idx)
+            stdscr.refresh()
+            
+        _redraw()
 
         while True:
             ch = stdscr.getch()
             if ch in (curses.KEY_ENTER, 10, 13):
                 break
-            elif ch in (27,):  # ESC
+            elif ch == 27:  # ESC
                 buf.clear()
                 break
+            elif ch in (curses.KEY_LEFT,):
+                if buf_idx > 0:
+                    buf_idx -= 1
+                    _redraw()
+            elif ch in (curses.KEY_RIGHT,):
+                if buf_idx < len(buf):
+                    buf_idx += 1
+                    _redraw()
             elif ch in (curses.KEY_BACKSPACE, 127, 8):
-                if buf:
-                    buf.pop()
-                    x_pos -= 1
-                    stdscr.addstr(max_y - 2, x_pos, " ")
-                    stdscr.move(max_y - 2, x_pos)
-            elif 32 <= ch <= 126 and x_pos < max_x - 2:
-                char = chr(ch)
-                buf.append(char)
-                stdscr.addstr(max_y - 2, x_pos, char)
-                x_pos += 1
-            stdscr.refresh()
+                if buf_idx > 0:
+                    buf.pop(buf_idx - 1)
+                    buf_idx -= 1
+                    _redraw()
+            elif ch == curses.KEY_DC: # Delete key
+                if buf_idx < len(buf):
+                    buf.pop(buf_idx)
+                    _redraw()
+            elif 32 <= ch <= 126 and len(buf) < max_x - start_x - 2:
+                buf.insert(buf_idx, chr(ch))
+                buf_idx += 1
+                _redraw()
 
         curses.noecho()
         try:
