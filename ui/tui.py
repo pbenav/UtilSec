@@ -1828,6 +1828,74 @@ class SentinelTUI:
                     stdscr.addstr(row_y, col2_x, line[:col2_w], self.C_WARN)
 
 
+
+    def _menu_select(self, stdscr, title: str, options: list) -> str:
+        idx = 0
+        while True:
+            stdscr.erase()
+            max_y, max_x = stdscr.getmaxyx()
+            stdscr.addstr(2, 4, title, curses.color_pair(self.C_INFO) | curses.A_BOLD)
+            
+            for i, opt in enumerate(options):
+                if i == idx:
+                    stdscr.addstr(4 + i, 6, f"> {opt[1]}", curses.color_pair(self.C_SUCCESS) | curses.A_REVERSE)
+                else:
+                    stdscr.addstr(4 + i, 6, f"  {opt[1]}", curses.color_pair(self.C_DEFAULT))
+                    
+            stdscr.addstr(max_y - 3, 4, "Usa ARRIBA/ABAJO y pulsa ENTER", curses.color_pair(self.C_MUTED))
+            stdscr.refresh()
+            
+            k = stdscr.getch()
+            if k in (curses.KEY_UP, ord('k')) and idx > 0:
+                idx -= 1
+            elif k in (curses.KEY_DOWN, ord('j')) and idx < len(options) - 1:
+                idx += 1
+            elif k in (curses.KEY_ENTER, 10, 13):
+                return options[idx][0]
+            elif k == 27: # ESC
+                return None
+
+    def _show_waf_rule_wizard(self, stdscr) -> str:
+        # Step 1: Variable
+        var = self._menu_select(stdscr, "1. ¿Qué parte de la petición quieres inspeccionar?", [
+            ("REQUEST_URI", "La URL completa (ej: /index.php?id=1)"),
+            ("ARGS", "Cualquier parámetro GET/POST (ej: id=1)"),
+            ("REQUEST_HEADERS", "Las cabeceras HTTP (User-Agent, etc)"),
+            ("REQUEST_BODY", "El cuerpo de la petición (Payloads)")
+        ])
+        if not var: return None
+        
+        # Step 2: Operator
+        op = self._menu_select(stdscr, "2. ¿Cómo quieres buscar el texto malicioso?", [
+            ("@contains", "Texto exacto contenido (Recomendado)"),
+            ("@rx", "Expresión Regular (Regex)"),
+            ("@pm", "Múltiples palabras exactas separadas por espacio"),
+            ("@beginsWith", "Empieza exactamente por...")
+        ])
+        if not op: return None
+        
+        # Step 3: Match String
+        stdscr.erase()
+        val = self._prompt_input(stdscr, f"3. Escribe el patrón/texto a buscar para {op} (ej: virus): ")
+        if not val: return None
+        
+        # Step 4: Action
+        action = self._menu_select(stdscr, "4. ¿Qué debe hacer el WAF si lo encuentra?", [
+            ("drop", "DROP: Cerrar conexión TCP silenciosamente (Recomendado)"),
+            ("deny,status:403", "DENY: Devolver error HTTP 403 Forbidden"),
+            ("deny,status:444", "DENY: Cerrar conexión Nginx (444)")
+        ])
+        if not action: return None
+        
+        # Step 5: Message
+        stdscr.erase()
+        msg = self._prompt_input(stdscr, "5. Breve mensaje de log (ej: Intento de XSS): ")
+        if not msg: msg = "Regla WAF Personalizada UtilSec"
+        
+        rule_id = random.randint(10000, 99999)
+        rule_str = f"SecRule {var} \"{op} {val}\" \"id:{rule_id},phase:1,{action},msg:'UtilSec: {msg}'\""
+        return rule_str
+
     def _show_waf_modal(self, stdscr):
         from core.waf import waf_mgr
         stdscr.erase()
@@ -1864,12 +1932,22 @@ class SentinelTUI:
             if k in (ord('q'), ord('Q'), 27):
                 break
             elif k in (ord('n'), ord('N')):
-                new_rule = self._prompt_input(stdscr, "Introduce directiva SecRule (ej: SecRule ARGS '@rx DROP TABLE' ...): ")
+                choice = self._menu_select(stdscr, "¿Cómo quieres crear la regla?", [
+                    ("wizard", "Usar el Asistente Guiado paso a paso (Recomendado)"),
+                    ("manual", "Escribir la directiva SecRule a mano")
+                ])
+                new_rule = None
+                if choice == "wizard":
+                    new_rule = self._show_waf_rule_wizard(stdscr)
+                elif choice == "manual":
+                    stdscr.erase()
+                    new_rule = self._prompt_input(stdscr, "Escribe la directiva completa: ")
+                    
                 if new_rule and new_rule.startswith("SecRule"):
                     waf_mgr.add_custom_rule(new_rule)
                     rules = waf_mgr.get_custom_rules()
-                    self.set_status(f"Regla WAF añadida.")
-                else:
+                    self.set_status(f"Regla WAF añadida con éxito.")
+                elif new_rule:
                     self.set_status("Directiva inválida (debe empezar por SecRule)")
             elif k in (ord('d'), ord('D')):
                 idx_str = self._prompt_input(stdscr, "Índice de regla a borrar: ")
