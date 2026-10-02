@@ -1921,47 +1921,72 @@ class SentinelTUI:
 
 
     def _show_waf_help_modal(self, stdscr):
+        lines = [
+            ("--- 1. VARIABLES (¿Dónde buscamos?) ---", self.C_HEADER),
+            ("REQUEST_URI      : La URL completa (ej: /wp-admin).", self.C_DEFAULT),
+            ("ARGS             : Todos los parámetros GET y POST (magia pura contra XSS/SQLi).", self.C_DEFAULT),
+            ("REQUEST_HEADERS  : Cabeceras HTTP. Útil con :User-Agent para bloquear bots.", self.C_DEFAULT),
+            ("REQUEST_BODY     : Cuerpo de la petición (requiere usar phase:2).", self.C_DEFAULT),
+            ("REMOTE_ADDR      : La IP del cliente.", self.C_DEFAULT),
+            ("", self.C_DEFAULT),
+            ("--- 2. OPERADORES (¿Cómo buscamos?) ---", self.C_HEADER),
+            ("@contains <txt>  : Busca un texto exacto. Muy rápido, consume 0 CPU.", self.C_DEFAULT),
+            ("@pm <t1> <t2>    : Parallel Match. Busca múltiples palabras a la vez (ej: diccionarios).", self.C_DEFAULT),
+            ("@rx <regex>      : Expresiones regulares. Muy potente, pero consume más CPU.", self.C_DEFAULT),
+            ("@streq <txt>     : El texto debe coincidir exactamente de principio a fin.", self.C_DEFAULT),
+            ("", self.C_DEFAULT),
+            ("--- 3. ACCIONES (Siempre van juntas, ej: id:1,phase:1,drop) ---", self.C_HEADER),
+            ("id:<numero>      : OBLIGATORIO. Identificador único de la regla (ej: 10001).", self.C_DEFAULT),
+            ("phase:1 / 2      : 1 (Cabeceras, rapidísimo). 2 (Cuerpo/POST).", self.C_DEFAULT),
+            ("drop             : Corta la conexión TCP al instante. El atacante no recibe nada.", self.C_DEFAULT),
+            ("deny,status:403  : Bloquea y devuelve un error 403 HTTP estándar.", self.C_DEFAULT),
+            ("", self.C_DEFAULT),
+            ("--- EJEMPLOS PRÁCTICOS ---", self.C_HEADER),
+            ("1. Bloquear Bots y Escáneres:", self.C_INFO),
+            ('SecRule REQUEST_HEADERS:User-Agent "@rx (?i)(nikto|sqlmap|masscan|zgrab|nmap)" "id:10002,phase:1,drop,msg:\'Bot bloqueado\'"', self.C_DEFAULT),
+            ("", self.C_DEFAULT),
+            ("2. Bloquear LFI / Path Traversal:", self.C_INFO),
+            ('SecRule REQUEST_URI|ARGS "@pm /etc/passwd /etc/shadow /proc/self/environ" "id:10003,phase:1,drop,msg:\'Intento LFI\'"', self.C_DEFAULT),
+            ("", self.C_DEFAULT),
+            ("3. Sellar paneles de administración:", self.C_INFO),
+            ('SecRule REQUEST_URI "@pm /wp-login.php /xmlrpc.php /pma" "id:10004,phase:1,drop,msg:\'Acceso denegado\'"', self.C_DEFAULT),
+            ("", self.C_DEFAULT),
+            ("4. Bloquear Inyecciones SQL básicas:", self.C_INFO),
+            ('SecRule ARGS|REQUEST_URI "@rx (?i)(union.+select|select.+from.+information_schema)" "id:10005,phase:1,drop,msg:\'SQLi\'"', self.C_DEFAULT),
+            ("", self.C_DEFAULT)
+        ]
+        
+        offset = 0
         while True:
             stdscr.erase()
             max_y, max_x = stdscr.getmaxyx()
             
-            title = " [ EJEMPLOS PRÁCTICOS DE REGLAS WAF ] "
+            title = " [ MANUAL Y EJEMPLOS DE REGLAS WAF ] "
             stdscr.addstr(1, max(0, (max_x - len(title)) // 2), title, curses.color_pair(self.C_HEADER) | curses.A_BOLD)
             
-            lines = [
-                ("1. Bloquear Escáneres de Vulnerabilidades (User-Agent):", self.C_INFO),
-                ('SecRule REQUEST_HEADERS:User-Agent "@rx (?i)(nikto|sqlmap|masscan|zgrab|nmap)" "id:10002,phase:1,drop,msg:\'Bot bloqueado\'"', self.C_DEFAULT),
-                ("", self.C_DEFAULT),
-                ("2. Bloquear LFI (Local File Inclusion / Path Traversal):", self.C_INFO),
-                ('SecRule REQUEST_URI|ARGS "@pm /etc/passwd /etc/shadow /proc/self/environ" "id:10003,phase:1,drop,msg:\'Intento LFI\'"', self.C_DEFAULT),
-                ("", self.C_DEFAULT),
-                ("3. Sellar paneles de administración (WordPress, phpMyAdmin):", self.C_INFO),
-                ('SecRule REQUEST_URI "@pm /wp-login.php /xmlrpc.php /pma" "id:10004,phase:1,drop,msg:\'Acceso denegado\'"', self.C_DEFAULT),
-                ("", self.C_DEFAULT),
-                ("4. Bloquear el 99% de las Inyecciones SQL básicas:", self.C_INFO),
-                ('SecRule ARGS|REQUEST_URI "@rx (?i)(union.+select|select.+from.+information_schema)" "id:10005,phase:1,drop,msg:\'SQLi\'"', self.C_DEFAULT),
-                ("", self.C_DEFAULT),
-                ("5. Bloquear una IP o subred de atacantes conocidos:", self.C_INFO),
-                ('SecRule REMOTE_ADDR "@ipMatch 192.168.1.100, 10.0.0.0/8" "id:10006,phase:1,drop,msg:\'IP Maliciosa\'"', self.C_DEFAULT)
-            ]
-            
-            for i, (text, color) in enumerate(lines):
-                if i + 3 < max_y - 3:
-                    # Truncate if too long to prevent wrap-around curses errors
+            visible_lines = max_y - 6
+            for i in range(visible_lines):
+                idx = offset + i
+                if idx < len(lines):
+                    text, color = lines[idx]
                     disp = text[:max_x - 4]
-                    if color == self.C_INFO:
+                    if color in (self.C_INFO, self.C_HEADER):
                         stdscr.addstr(3 + i, 2, disp, curses.color_pair(color) | curses.A_BOLD)
                     else:
                         stdscr.addstr(3 + i, 2, disp, curses.color_pair(color))
                         
-            stdscr.addstr(max_y - 2, 2, " [ Puedes seleccionar este texto con el ratón para copiarlo ] ", curses.color_pair(self.C_WARN))
-            stdscr.addstr(max_y - 1, 2, " Pulsa cualquier tecla para volver... ", curses.color_pair(self.C_MUTED))
+            stdscr.addstr(max_y - 2, 2, " [ Usa ARRIBA/ABAJO para moverte | ESC o Q para salir ] ", curses.color_pair(self.C_WARN))
             
             stdscr.refresh()
-            stdscr.timeout(-1)  # Make getch blocking
+            stdscr.timeout(-1)
             k = stdscr.getch()
+            
             if k in (27, 10, 13, ord('q'), ord('Q')):
                 break
+            elif k in (curses.KEY_UP, ord('k')) and offset > 0:
+                offset -= 1
+            elif k in (curses.KEY_DOWN, ord('j')) and offset < max(0, len(lines) - visible_lines):
+                offset += 1
 
     def _show_waf_modal(self, stdscr):
         from core.waf import waf_mgr
