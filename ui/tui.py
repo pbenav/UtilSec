@@ -1939,11 +1939,31 @@ class SentinelTUI:
             
             stdscr.addstr(6, 4, "Reglas Personalizadas (utilsec_custom.conf):", curses.color_pair(self.C_INFO) | curses.A_BOLD)
             
+            if max_x > 100:
+                cx = max_x - 45
+                stdscr.addstr(4, cx, "┌─ CHULETA ModSecurity ────────────────┐", curses.color_pair(self.C_MUTED))
+                stdscr.addstr(5, cx, "│ Variables:                           │", curses.color_pair(self.C_MUTED))
+                stdscr.addstr(6, cx, "│  REQUEST_URI (URL completa)          │", curses.color_pair(self.C_MUTED))
+                stdscr.addstr(7, cx, "│  ARGS (Parámetros GET/POST)          │", curses.color_pair(self.C_MUTED))
+                stdscr.addstr(8, cx, "│  REQUEST_HEADERS (Cabeceras HTTP)    │", curses.color_pair(self.C_MUTED))
+                stdscr.addstr(9, cx, "│ Operadores:                          │", curses.color_pair(self.C_MUTED))
+                stdscr.addstr(10, cx, "│  @contains <txt> (Texto exacto)      │", curses.color_pair(self.C_MUTED))
+                stdscr.addstr(11, cx, "│  @rx <regex> (Expresión regular)     │", curses.color_pair(self.C_MUTED))
+                stdscr.addstr(12, cx, "│  @pm <txt> <txt> (Múltiples palabras)│", curses.color_pair(self.C_MUTED))
+                stdscr.addstr(13, cx, "│ Acciones (obligan id:N,phase:1):     │", curses.color_pair(self.C_MUTED))
+                stdscr.addstr(14, cx, "│  drop (Cortar TCP silencioso)        │", curses.color_pair(self.C_MUTED))
+                stdscr.addstr(15, cx, "│  deny,status:403 (Error HTTP)        │", curses.color_pair(self.C_MUTED))
+                stdscr.addstr(16, cx, "└──────────────────────────────────────┘", curses.color_pair(self.C_MUTED))
+                
+                avail_x = cx - 15
+            else:
+                avail_x = max_x - 15
+
             if not rules:
                 stdscr.addstr(8, 6, "No hay reglas WAF personalizadas cargadas.", curses.color_pair(self.C_MUTED))
             else:
                 for i, r in enumerate(rules[:15]):
-                    disp = (r[:max_x-15] + "..") if len(r) > max_x-15 else r
+                    disp = (r[:avail_x] + "..") if len(r) > avail_x else r
                     stdscr.addstr(8 + i, 6, f"[{i}] {disp}", curses.color_pair(self.C_DEFAULT))
             
             stdscr.addstr(max_y - 4, 2, "────────────────────────────────────────────────────────", curses.color_pair(self.C_MUTED))
