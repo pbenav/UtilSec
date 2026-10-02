@@ -1864,7 +1864,7 @@ class SentinelTUI:
             if k in (ord('q'), ord('Q'), 27):
                 break
             elif k in (ord('n'), ord('N')):
-                new_rule = self._prompt_string(stdscr, "Introduce directiva SecRule (ej: SecRule ARGS '@rx DROP TABLE' ...): ")
+                new_rule = self._prompt_input(stdscr, "Introduce directiva SecRule (ej: SecRule ARGS '@rx DROP TABLE' ...): ")
                 if new_rule and new_rule.startswith("SecRule"):
                     waf_mgr.add_custom_rule(new_rule)
                     rules = waf_mgr.get_custom_rules()
@@ -1872,7 +1872,7 @@ class SentinelTUI:
                 else:
                     self.set_status("Directiva inválida (debe empezar por SecRule)", "error")
             elif k in (ord('d'), ord('D')):
-                idx_str = self._prompt_string(stdscr, "Índice de regla a borrar: ")
+                idx_str = self._prompt_input(stdscr, "Índice de regla a borrar: ")
                 if idx_str.isdigit():
                     idx = int(idx_str)
                     if waf_mgr.remove_custom_rule(idx):
