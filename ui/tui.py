@@ -909,6 +909,8 @@ class SentinelTUI:
                 if hasattr(self, "screen_attacks"):
                     for dq in self.screen_attacks.values():
                         dq.clear()
+                with self._analytics_lock:
+                    self._stats_data = None
                 self._update_stats_async(force=True)
                 self.set_status("Estadísticas reseteadas (a cero).")
 
