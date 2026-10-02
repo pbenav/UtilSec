@@ -309,6 +309,17 @@ class StorageManager:
                 events.append(ev)
         return events
 
+    def reset_stats(self) -> None:
+        """Clears all attack events and statistics from the database (does not affect active bans or logs)."""
+        with self._lock:
+            self._flush_locked()
+            try:
+                conn = self._get_conn()
+                conn.execute("DELETE FROM attack_events")
+                conn.commit()
+            except sqlite3.Error as e:
+                logger.error(f"Failed to reset stats in DB: {e}")
+
     def get_stats(self) -> Dict[str, int]:
         with self._lock:
             self._flush_locked()

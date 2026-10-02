@@ -898,6 +898,20 @@ class SentinelTUI:
                 self._update_stats_async(force=True)
                 self.set_status("Actualizando estadísticas...")
 
+        elif key in (ord("z"), ord("Z")):
+            if hasattr(self, '_showing_stats') and self._showing_stats:
+                if self.storage:
+                    self.storage.reset_stats()
+                if hasattr(self, "detector"):
+                    self.detector.reset_counters()
+                if hasattr(self, "recent_attacks"):
+                    self.recent_attacks.clear()
+                if hasattr(self, "screen_attacks"):
+                    for dq in self.screen_attacks.values():
+                        dq.clear()
+                self._update_stats_async(force=True)
+                self.set_status("Estadísticas reseteadas (a cero).")
+
         elif key == 27 or key == 255:
             # ESC key - close stats screen
             if hasattr(self, '_showing_stats') and self._showing_stats:
@@ -1688,7 +1702,7 @@ class SentinelTUI:
         stdscr.addstr(1, 0, "─" * (max_x - 1), curses.color_pair(self.C_MUTED))
 
         # Help bar
-        help_text = " [ESC/E] Volver al panel principal   [R] Actualizar datos "
+        help_text = " [ESC/E] Volver al panel principal   [R] Actualizar   [Z] Resetear estadísticas "
         stdscr.addstr(max_y - 2, 0, " " * (max_x - 1), curses.color_pair(self.C_MUTED))
         stdscr.addstr(max_y - 2, 2, help_text[: max_x - 4], curses.color_pair(self.C_MUTED) | curses.A_BOLD)
 
