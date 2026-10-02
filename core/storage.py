@@ -315,7 +315,7 @@ class StorageManager:
             self._flush_locked()
             try:
                 conn = self._get_conn()
-                conn.execute("DELETE FROM attack_events")
+                conn.execute("DELETE FROM events")
                 conn.commit()
             except sqlite3.Error as e:
                 logger.error(f"Failed to reset stats in DB: {e}")
