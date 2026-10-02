@@ -1958,8 +1958,10 @@ class SentinelTUI:
             stdscr.addstr(max_y - 1, 2, " Pulsa cualquier tecla para volver... ", curses.color_pair(self.C_MUTED))
             
             stdscr.refresh()
-            stdscr.getch()
-            break
+            stdscr.timeout(-1)  # Make getch blocking
+            k = stdscr.getch()
+            if k in (27, 10, 13, ord('q'), ord('Q')):
+                break
 
     def _show_waf_modal(self, stdscr):
         from core.waf import waf_mgr
