@@ -1963,9 +1963,43 @@ class FirewallManager:
             return (True, "Switched firewall mode to: SIMULATION (Dry-run)")
 
     def stop(self) -> None:
+        """Drop UtilSec rules from the live firewall on exit.
+
+        The bans table is the source of truth: the next startup re-applies every
+        surviving ban through ``_sync_bans_with_firewall()``. Only the iptables
+        backend used to be flushed here, so leaving the app on nft or ufw kept
+        the rules in place while nothing guaranteed they matched the database.
+        """
         self.running = False
         try:
-            if hasattr(self, 'backend'):
+            if self.dry_run:
+                logger.info("[DRY-RUN] Would flush all UtilSec firewall rules on exit")
+            elif self.active_backend == "nft":
+                self._flush_nft_sets_on_exit()
+            elif self.active_backend == "ufw":
+                for rule in self._scan_utilsec_rules():
+                    if rule.source == "utilsec" and rule.ip:
+                        self._exec_unban_system(BanRecord(
+                            ip=rule.ip, reason="UtilSec shutdown", matched_pattern="",
+                            attack_count=0, banned_at=0.0, ban_duration=0,
+                            backend=self.active_backend,
+                        ))
+            elif hasattr(self, "backend"):
                 self.backend.exec_flush()
         except Exception as e:
             logger.error("Error flushing firewall rules on stop: %s", e)
+
+    def _flush_nft_sets_on_exit(self) -> None:
+        """Empty the ban sets, mirroring ``iptables -F UTILSEC-BAN``.
+
+        The table, hook chain and whitelist accepts stay in place; only set
+        members are cleared, and ``input`` still drops ``@utilsec_bans*``.
+        """
+        prefix = [] if os.geteuid() == 0 else ["sudo", "-n"]
+        for set_name in (NFT_SETS[4], NFT_SETS[6]):
+            try:
+                subprocess.run(prefix + ["nft", "flush", "set", "inet", NFT_TABLE, set_name],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+            except Exception as exc:
+                logger.error("Failed to flush nft set %s on exit: %s", set_name, exc)
+        logger.info("Flushed all bans from nft sets %s and %s.", NFT_SETS[4], NFT_SETS[6])

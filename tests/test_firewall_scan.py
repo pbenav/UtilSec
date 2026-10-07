@@ -324,5 +324,95 @@ class TestNftInfra(unittest.TestCase):
         self.assertEqual(_nft_set_for("2001:db8::/48"), NFT_SETS[6])
 
 
+class TestStopFlush(unittest.TestCase):
+    """stop() has to clean every backend, not only iptables.
+
+    The remote change that flushed UTILSEC-BAN on exit silently skipped nft and
+    ufw (both fall back to DryRunBackend), leaving rules behind while the
+    database was still the source of truth for the next startup.
+    """
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.fw = FirewallManager(backend="auto", dry_run=True, storage=None,
+                                  audit_dir=self.tmp_dir.name)
+
+    def tearDown(self):
+        # Always leave in dry-run so the cleanup itself never runs a firewall
+        # command for the backend the test just exercised.
+        self.fw.dry_run = True
+        self.fw.stop()
+        self.tmp_dir.cleanup()
+
+    def _live(self, backend: str) -> None:
+        self.fw.dry_run = False
+        self.fw.active_backend = backend
+
+    def test_dry_run_never_touches_the_firewall(self):
+        with mock.patch.object(self.fw, "_flush_nft_sets_on_exit") as nft, \
+                mock.patch.object(self.fw, "_exec_unban_system") as unban, \
+                mock.patch.object(self.fw, "backend") as backend:
+            self.fw.stop()
+        nft.assert_not_called()
+        unban.assert_not_called()
+        backend.exec_flush.assert_not_called()
+        self.assertFalse(self.fw.running)
+
+    def test_iptables_flushes_its_chain(self):
+        self._live("iptables")
+        with mock.patch.object(self.fw, "backend") as backend:
+            self.fw.stop()
+        backend.exec_flush.assert_called_once()
+
+    def test_nft_flushes_both_ban_sets(self):
+        self._live("nft")
+        with mock.patch.object(self.fw, "_flush_nft_sets_on_exit") as nft, \
+                mock.patch.object(self.fw, "backend") as backend:
+            self.fw.stop()
+        nft.assert_called_once()
+        backend.exec_flush.assert_not_called()
+
+    def test_nft_flush_targets_our_own_table_and_sets(self):
+        from core.firewall import NFT_SETS
+        self._live("nft")
+        with mock.patch("core.firewall.subprocess.run") as run:
+            self.fw._flush_nft_sets_on_exit()
+        cmds = [" ".join(c.args[0]) for c in run.call_args_list]
+        self.assertEqual(len(cmds), 2)
+        for set_name in (NFT_SETS[4], NFT_SETS[6]):
+            self.assertTrue(
+                any(f"flush set inet utilsec {set_name}" in c for c in cmds),
+                f"falta el volcado de {set_name}: {cmds}",
+            )
+            # Never touches a table other than ours
+            self.assertFalse(any("filter" in c for c in cmds))
+
+    def test_ufw_removes_every_utilsec_rule_only(self):
+        self._live("ufw")
+        rules = [
+            FirewallRuleInfo(ip="1.2.3.4/32", source="utilsec", reason="ban", backend="ufw"),
+            FirewallRuleInfo(ip="5.6.7.0/24", source="utilsec", reason="ban", backend="ufw"),
+            FirewallRuleInfo(ip="9.9.9.9", source="fail2ban", reason="jail-sshd", backend="ufw"),
+            FirewallRuleInfo(ip="10.1.2.3", source="manual", reason="operator", backend="ufw"),
+        ]
+        with mock.patch.object(self.fw, "_scan_utilsec_rules", return_value=rules), \
+                mock.patch.object(self.fw, "_exec_unban_system") as unban:
+            self.fw.stop()
+        removed = [c.args[0].ip for c in unban.call_args_list]
+        self.assertEqual(removed, ["1.2.3.4/32", "5.6.7.0/24"])
+
+    def test_flush_error_does_not_break_shutdown(self):
+        self._live("iptables")
+        with mock.patch.object(self.fw, "backend") as backend:
+            backend.exec_flush.side_effect = RuntimeError("firewall exploded")
+            self.fw.stop()
+        self.assertFalse(self.fw.running)
+
+    def test_running_flag_goes_down_even_without_backend(self):
+        del self.fw.backend
+        self.fw.stop()
+        self.assertFalse(self.fw.running)
+
+
 if __name__ == "__main__":
     unittest.main()
