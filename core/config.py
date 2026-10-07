@@ -123,6 +123,11 @@ class ConfigManager:
         self.threshold_404 = int(self.raw_config.get("threshold_404", 2))
         self.threshold_403 = int(self.raw_config.get("threshold_403", 1))
         self.window_seconds = int(self.raw_config.get("window_seconds", 60))
+        # Long-horizon ban for slow scanners: the 403/404 windows above are
+        # in-memory and only cover `window_seconds`, so an IP that spreads its
+        # probes over hours is never banned. 0 disables the watchdog.
+        self.probe_ban_threshold = max(0, int(self.raw_config.get("probe_ban_threshold", 100)))
+        self.probe_ban_window = max(60, int(self.raw_config.get("probe_ban_window", 86400)))
         self.ban_subnet = bool(self.raw_config.get("ban_subnet", True))
         self.subnet_cidr_ipv4 = int(self.raw_config.get("subnet_cidr_ipv4", 24))
         self.subnet_cidr_ipv6 = int(self.raw_config.get("subnet_cidr_ipv6", 64))

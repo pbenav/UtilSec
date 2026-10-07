@@ -179,8 +179,11 @@ El archivo `config.json` permite personalizar todos los parámetros. La plantill
 | `default_ban_duration` | Duración del ban en segundos (`0` = permanente). |
 | `ban_subnet` / `subnet_cidr_ipv4` / `subnet_cidr_ipv6` | Bloqueo por subred (`/24` por defecto en IPv4, `/64` en IPv6). |
 | `threshold_404` / `threshold_403` / `window_seconds` | Ventana deslizante de control de tasa. |
+| `probe_ban_threshold` / `probe_ban_window` | Ban para **sondas lentas**: número de eventos `probe` (403/404 por debajo del umbral anterior) que caben en la ventana. Por defecto `100` en `86400` s (24 h); `0` lo desactiva. |
 | `whitelist` | IPs y rangos que **nunca** se bloquean (se separan automáticamente de cualquier subred banneada). |
 | `user_patterns` / `heuristic_rules` | Firmas de ataque capa 1 y capa 2. |
+
+> **Nota sobre las estadísticas**: los eventos `probe` (403/404 que no alcanzan el umbral de la ventana deslizante) se persisten para forense pero **no se banean ni cuentan como ataques**: el panel los muestra aparte como "Sondeos". "Peticiones analizadas", "Tasa de ataque" y "Errores 404/403" son de la sesión en curso; ataques, sondeos, IPs únicas y top IPs son del histórico completo de `sentinel_history.db`.
 
 ---
 

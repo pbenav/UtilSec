@@ -17,6 +17,7 @@ from core.config import ConfigManager
 from core.detector import AttackDetector
 from core.firewall import FirewallManager
 from core.models import AttackEvent, BanRecord
+from core.probes import ProbeWatchdog
 from core.storage import StorageManager
 from core.watcher import LogWatcher, LogWatcherManager
 from ui.tui import SentinelTUI
@@ -180,6 +181,10 @@ def main():
 
     # 4. Setup Attack Detector
     detector = AttackDetector(config=config)
+    # The 403/404 rate limiter only sees a short in-memory window, so a
+    # scanner that spreads its probes over hours is never banned. This
+    # watchdog accumulates them over `probe_ban_window` (default 24h).
+    probe_watchdog = ProbeWatchdog(config=config, storage=storage)
 
     # 5. Handler for parsed requests
     def on_request(ip: str, method: str, url: str, status: int, raw_line: str, source_log: str = "default"):
@@ -195,6 +200,20 @@ def main():
             )
 
             if event:
+                if event.category == "probe" and not (should_ban or already_banned):
+                    # Counted before log_event() so the history restored from
+                    # SQLite never includes the probe being handled right now.
+                    fired = probe_watchdog.record(ip)
+                    if fired:
+                        count, window = fired
+                        should_ban = True
+                        ban_reason = f"Slow scanner: {count} probes in {max(1, window // 3600)}h"
+                        # Escalation: this row *is* the enforcement decision, so
+                        # it is stored as an attack and counted in the session
+                        # counter (plain probes stay forensic-only).
+                        event.category = "rate_limit"
+                        event.matched_rule = f"Slow Scanner Threshold ({count} probes)"
+                        detector.total_attacks_detected += 1
                 storage.log_event(event)
                 if tui_ref[0]:
                     tui_ref[0].add_attack_event(event)

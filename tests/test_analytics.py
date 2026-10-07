@@ -89,6 +89,37 @@ class TestAnalytics(unittest.TestCase):
         self.assertEqual(len(top_rules), 1)
         self.assertEqual(top_rules[0][0], "Env Leaks")
 
+    def test_probes_are_reported_apart_from_attacks(self):
+        """`probe` rows are stored for forensics but never ban: not attacks."""
+        for i in range(3):
+            self.storage.log_event(AttackEvent(
+                timestamp=datetime.now(), ip=f"192.0.2.{10 + i}", method="GET",
+                url="/.env", status_code=404, matched_rule="Env Leaks",
+                category="credentials",
+            ))
+        for i in range(7):
+            self.storage.log_event(AttackEvent(
+                timestamp=datetime.now(), ip="198.51.100.50", method="GET",
+                url="/nope", status_code=404, matched_rule="HTTP 404 Probe",
+                category="probe",
+            ))
+
+        analytics = AttackAnalytics(
+            detector=self.detector,
+            recent_attacks=self.recent_attacks,
+            screen_attacks=self.screen_attacks,
+            storage=self.storage,
+        )
+        overall = analytics.get_overall_stats()
+        self.assertEqual(overall["total_attacks"], 3)
+        self.assertEqual(overall["total_probes"], 7)
+        self.assertEqual(overall["unique_ips"], 4)
+
+        # The category breakdown still shows both, so nothing is hidden.
+        categories = {cat: cnt for cat, cnt, _pct in analytics.get_category_breakdown()}
+        self.assertEqual(categories["credentials"], 3)
+        self.assertEqual(categories["probe"], 7)
+
     def test_geolocation_non_blocking_performance(self):
         for i in range(20):
             ev = AttackEvent(

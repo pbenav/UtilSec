@@ -86,11 +86,18 @@ class AttackAnalytics:
         active_bans = 0
         total_banned = 0
         unique_ips = 0
+        total_probes = 0
 
         if self.storage:
             try:
                 summary = self.storage.get_analytics_summary()
-                total_events = max(session_attacks, summary.get("total_events", 0))
+                # `probe` rows are stored for forensics but never banned: they
+                # are reported apart instead of inflating the attack total.
+                total_events = max(
+                    session_attacks,
+                    summary.get("attacks", summary.get("total_events", 0)),
+                )
+                total_probes = summary.get("total_probes", 0)
                 active_bans = summary.get("active_bans", 0)
                 total_banned = summary.get("total_banned", 0)
                 unique_ips = summary.get("unique_ips", 0)
@@ -98,7 +105,8 @@ class AttackAnalytics:
                 pass
         else:
             all_attacks = self._get_all_attacks()
-            total_events = max(session_attacks, len(all_attacks))
+            total_probes = sum(1 for ev in all_attacks if ev.category == "probe")
+            total_events = max(session_attacks, len(all_attacks) - total_probes)
             unique_ips = len(set(ev.ip for ev in all_attacks))
 
         attack_rate = self._safe_percentage(session_attacks, session_analyzed)
@@ -107,6 +115,7 @@ class AttackAnalytics:
             "total_analyzed": session_analyzed,
             "total_attacks": total_events,
             "total_attacks_detected": total_events,
+            "total_probes": total_probes,
             "session_attacks": session_attacks,
             "attack_rate": attack_rate,
             "total_404s": session_404s,

@@ -309,6 +309,23 @@ class StorageManager:
                 events.append(ev)
         return events
 
+    def probe_history(self, ip: str, since: float, limit: int = 5000) -> List[float]:
+        """Probe timestamps of `ip` newer than `since`, oldest first.
+
+        Used by the long-horizon watchdog to restore its counters after a
+        restart: the per-window 403/404 counters live in memory only, so
+        without this a slow scanner would start from zero on every boot.
+        """
+        with self._lock:
+            self._flush_locked()
+            conn = self._get_conn()
+            rows = conn.execute(
+                "SELECT timestamp FROM events WHERE ip = ? AND category = 'probe' "
+                "AND timestamp >= ? ORDER BY timestamp ASC LIMIT ?",
+                (ip, since, limit),
+            ).fetchall()
+        return [row[0] for row in rows]
+
     def reset_stats(self) -> None:
         """Clears all attack events and statistics from the database (does not affect active bans or logs)."""
         with self._lock:
@@ -371,8 +388,16 @@ class StorageManager:
             cursor.execute("SELECT COUNT(*) FROM bans")
             total_banned = cursor.fetchone()[0]
 
+            # `probe` rows are 403/404 below the rate-limit threshold: they are
+            # stored for forensics but never trigger a ban, so they must not be
+            # reported as attacks.
+            cursor.execute("SELECT COUNT(*) FROM events WHERE category = 'probe'")
+            total_probes = cursor.fetchone()[0]
+
             return {
                 "total_events": total_events,
+                "attacks": max(0, total_events - total_probes),
+                "total_probes": total_probes,
                 "unique_ips": unique_ips,
                 "categories": categories,
                 "top_ips": top_ips,

@@ -1749,6 +1749,7 @@ class SentinelTUI:
         total_analyzed = overall.get("total_analyzed", 0)
         total_attacks = overall.get("total_attacks", overall.get("total_attacks_detected", 0))
         session_attacks = overall.get("session_attacks", 0)
+        total_probes = overall.get("total_probes", 0)
         attack_rate = overall.get("attack_rate", 0.0)
         total_404 = overall.get("total_404s", 0)
         total_403 = overall.get("total_403s", 0)
@@ -1762,7 +1763,8 @@ class SentinelTUI:
         stdscr.addstr(start_y, col1_x, "── RESUMEN GENERAL " + "─" * max(0, col1_w - 19), curses.color_pair(self.C_INFO) | curses.A_BOLD)
         stat_rows = [
             f"  Peticiones analizadas: {total_analyzed:,}",
-            f"  Ataques totales:       {total_attacks:,} (Sesión: {session_attacks:,})",
+            f"  Ataques (histórico):    {total_attacks:,} (Sesión: {session_attacks:,})",
+            f"  Sondeos (no banean):    {total_probes:,}",
             f"  Tasa de ataque:        {attack_rate:.1f}%",
             f"  Errores HTTP 404/403:  {total_404:,} / {total_403:,}",
             f"  IPs bloqueadas:        {active_bans:,} activas (Total: {total_banned:,})",
@@ -2115,6 +2117,7 @@ class SentinelTUI:
         total_analyzed = overall.get("total_analyzed", 0)
         total_attacks = overall.get("total_attacks", overall.get("total_attacks_detected", 0))
         session_attacks = overall.get("session_attacks", 0)
+        total_probes = overall.get("total_probes", 0)
         attack_rate = overall.get("attack_rate", 0.0)
         total_404 = overall.get("total_404s", 0)
         total_403 = overall.get("total_403s", 0)
@@ -2126,7 +2129,8 @@ class SentinelTUI:
 
         stat_lines = [
             f"  Peticiones analizadas: {total_analyzed:,}",
-            f"  Ataques totales:       {total_attacks:,} (Sesión: {session_attacks:,})",
+            f"  Ataques (histórico):    {total_attacks:,} (Sesión: {session_attacks:,})",
+            f"  Sondeos (no banean):    {total_probes:,}",
             f"  Tasa de ataque:        {attack_rate:.1f}%",
             f"  Errores 404 / 403:     {total_404:,} / {total_403:,}",
         ]
