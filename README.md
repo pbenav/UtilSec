@@ -61,7 +61,15 @@ Consulta [LICENSE](LICENSE) para más detalles.
 ## Requisitos
 
 - Linux
-- Python 3.10+ (utiliza la librería nativa `curses`, no requiere instalar librerías externas vía pip).
+- Python 3.10+ (utiliza la librería nativa `curses`; el motor de detección, la persistencia y el cortafuegos no necesitan ninguna dependencia externa vía pip).
+
+### Dependencia opcional: GeoIP
+
+La detección de país del atacante (columna `[XX]` del *Live Attack Stream*, panel de baneados y pantalla de estadísticas) usa la base MaxMind `data/GeoLite2-Country.mmdb` con el módulo `maxminddb`:
+```bash
+pip install -r requirements.txt
+```
+Sin esa librería (o sin la base de datos) UtilSec arranca igual: solo muestra `??` como país y deja GeoIP desactivado.
 
 ---
 
@@ -98,6 +106,12 @@ Ideal para ejecutar en servidores en segundo plano o como servicio `systemd`:
 UtilSec incluye un script automatizado para instalar, configurar y activar ModSecurity junto a OWASP CRS y reglas de intercepción en Fase 1 (cortando en microsegundos escaneos a `.env`, `.git`, `.aws`, `.docker`, etc. con `403 Forbidden` antes de tocar los workers de Apache):
 ```bash
 sudo ./scripts/setup_modsecurity.sh
+```
+
+### 4. Informe HTML de seguridad
+Genera un `report.html` con los totales de ataques y baneos, top de países, IPs, reglas y categorías de los últimos 7 días, leyendo directamente `sentinel_history.db`:
+```bash
+python3 tools/reporter.py
 ```
 
 ---
@@ -182,7 +196,7 @@ Con `pytest`:
 python3 -m pytest
 ```
 
-Los tests cubren el motor de detección, la persistencia, el análisis de estadísticas y el escaneo/sincronización del cortafuegos (`tests/test_firewall_scan.py`).
+Los tests cubren el motor de detección, la persistencia, la validación de configuración, el análisis de estadísticas, el escaneo/sincronización del cortafuegos (`tests/test_firewall_scan.py`) y el dibujado de la TUI en terminales pequeños (`tests/test_tui_layout.py`).
 
 Las pruebas escriben los scripts de auditoría en un directorio temporal (`UTILSEC_AUDIT_DIR`), por lo que no ensucian el árbol de trabajo.
 
