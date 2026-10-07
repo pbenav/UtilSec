@@ -27,6 +27,7 @@ sentinel.log
 *.log
 banned_ips.sh
 unban_ips.sh
+report.html
 logs
 logs.zip
 *.zip
