@@ -112,6 +112,77 @@ class TestConfigPersistence(unittest.TestCase):
         leftovers = [n for n in os.listdir(self.tmp_dir.name) if n != "config.json"]
         self.assertEqual(leftovers, [])
 
+    def test_add_and_remove_whitelist(self):
+        # Adding a valid new IP
+        self.assertTrue(self.config.add_whitelist("192.168.1.50", persist=True))
+        self.assertTrue(self.config.is_ip_whitelisted("192.168.1.50"))
+        # Verify persistence on disk
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            self.assertIn("192.168.1.50", data["whitelist"])
+
+        # Duplicate addition returns False
+        self.assertFalse(self.config.add_whitelist("192.168.1.50", persist=True))
+
+        # Invalid IP returns False
+        self.assertFalse(self.config.add_whitelist("not_an_ip; rm -rf /", persist=True))
+
+        # Removing whitelist entry
+        self.assertTrue(self.config.remove_whitelist("192.168.1.50", persist=True))
+        self.assertFalse(self.config.is_ip_whitelisted("192.168.1.50"))
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            self.assertNotIn("192.168.1.50", data["whitelist"])
+
+    def test_update_setting(self):
+        # Valid integer setting
+        self.assertTrue(self.config.update_setting("threshold_404", 5, persist=True))
+        self.assertEqual(self.config.threshold_404, 5)
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["threshold_404"], 5)
+
+        # Invalid integer setting (e.g. <= 0)
+        self.assertFalse(self.config.update_setting("threshold_404", 0, persist=True))
+        self.assertEqual(self.config.threshold_404, 5)
+
+        # Boolean setting toggle
+        self.assertTrue(self.config.update_setting("ban_subnet", False, persist=True))
+        self.assertFalse(self.config.ban_subnet)
+
+    def test_check_and_reload_if_modified(self):
+        import time
+
+        # No change
+        self.assertFalse(self.config.check_and_reload_if_modified())
+
+        # Internal save should not trigger reload
+        self.config.save()
+        self.assertFalse(self.config.check_and_reload_if_modified())
+
+        # Simulate external modification with valid JSON
+        time.sleep(0.05)
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            cur_data = json.load(f)
+        cur_data["threshold_404"] = 99
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump(cur_data, f)
+        # Force mtime update ahead
+        os.utime(self.config_path, (time.time() + 10, time.time() + 10))
+
+        # Check and reload detects change
+        self.assertTrue(self.config.check_and_reload_if_modified())
+        self.assertEqual(self.config.threshold_404, 99)
+
+        # Simulate external edit with malformed/incomplete JSON (e.g. mid-write in nano)
+        time.sleep(0.05)
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.write("{ incomplete json: ")
+        os.utime(self.config_path, (time.time() + 20, time.time() + 20))
+
+        # Malformed JSON should be ignored and retain current in-memory config
+        self.assertFalse(self.config.check_and_reload_if_modified())
+        self.assertEqual(self.config.threshold_404, 99)
+
 
 if __name__ == "__main__":
     unittest.main()

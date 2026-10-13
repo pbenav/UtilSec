@@ -59,6 +59,11 @@ class FakeScreen:
     def timeout(self, delay):
         pass
 
+    def getch(self):
+        if hasattr(self, "keys") and self.keys:
+            return self.keys.pop(0)
+        return ord("q")
+
     def move(self, y, x):
         if y < 0 or x < 0 or y >= self.rows or x >= self.cols:
             raise curses.error(f"move out of bounds: y={y} x={x}")
@@ -202,6 +207,35 @@ class TestTUILayout(unittest.TestCase):
         screen = FakeScreen(30, 100)
         tui._draw_stats_screen(screen, 30, 100)
         self.assertTrue(screen.writes)
+
+    def test_config_modal_renders_and_quits(self):
+        tui = self._tui()
+        screen = FakeScreen(30, 100)
+        screen.keys = [ord("q")]
+        tui._show_config_modal(screen)
+        self.assertIn("PANEL DE CONFIGURACIÓN", screen.text)
+        self.assertIn("Whitelist", screen.text)
+        self.assertIn("Ignored Paths", screen.text)
+
+    def test_config_modal_keybinding(self):
+        tui = self._tui()
+        screen = FakeScreen(30, 100)
+        screen.keys = [ord("q")]
+        with mock.patch.object(tui, "_show_config_modal") as mock_modal:
+            tui._handle_key(screen, ord("c"))
+            mock_modal.assert_called_once_with(screen)
+
+    def test_config_submodals(self):
+        tui = self._tui()
+        screen_wl = FakeScreen(30, 100)
+        screen_wl.keys = [ord("q")]
+        tui._show_config_whitelist_modal(screen_wl)
+        self.assertIn("GESTIÓN DE WHITELIST", screen_wl.text)
+
+        screen_ip = FakeScreen(30, 100)
+        screen_ip.keys = [ord("q")]
+        tui._show_config_ignored_paths_modal(screen_ip)
+        self.assertIn("GESTIÓN DE IGNORED PATHS", screen_ip.text)
 
 
 if __name__ == "__main__":

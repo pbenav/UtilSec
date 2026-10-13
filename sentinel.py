@@ -349,6 +349,11 @@ def main():
         try:
             while True:
                 time.sleep(1.0)
+                if config.check_and_reload_if_modified():
+                    detector.reload_rules()
+                    if hasattr(firewall, "whitelist_networks"):
+                        firewall.whitelist_networks = list(config.whitelist_networks)
+                    logger.info("[CONFIG] config.json modified externally: configuration hot-reloaded successfully.")
         except KeyboardInterrupt:
             shutdown()
 

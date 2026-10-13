@@ -67,6 +67,7 @@ class SentinelTUI:
 
         self.status_msg = "Ready. Monitoring logs..."
         self.status_msg_time = time.time()
+        self._last_config_check_time = time.time()
 
         # Table navigation
         self.selected_idx = 0
@@ -152,6 +153,16 @@ class SentinelTUI:
 
         while self.running:
             try:
+                # Periodic check for external config changes
+                now = time.time()
+                if now - self._last_config_check_time >= 1.5:
+                    self._last_config_check_time = now
+                    if self.config.check_and_reload_if_modified():
+                        self.detector.reload_rules()
+                        if hasattr(self.firewall, "whitelist_networks"):
+                            self.firewall.whitelist_networks = list(self.config.whitelist_networks)
+                        self.set_status("🔄 [CONFIG] config.json modificado externamente: recargado en caliente.")
+
                 max_y, max_x = stdscr.getmaxyx()
                 if max_y < 16 or max_x < 70:
                     self._draw_too_small(stdscr, max_y, max_x)
@@ -483,7 +494,7 @@ class SentinelTUI:
         stdscr.addstr(max_y - 2, 1, f"STATUS: {self.status_msg}"[: max_x - 2], curses.color_pair(self.C_INFO))
 
         # Hotkeys Bar (Line max_y - 1)
-        help_bar = "[Q]uit [0-9/[]]Screen [Tab/V]iew [M]ode [u]nban [U]xt [W]AF [-]Del [B]an [A]Rule [D]el [E]stats [P]ause [I]Info"
+        help_bar = "[Q]uit [0-9]Scr [Tab]View [M]ode [C]onfig [W]AF [B]an [u]nban [A]Rule [D]el [E]stats [P]ause [I]Info"
         stdscr.addstr(max_y - 1, 0, help_bar[: max_x - 1], curses.color_pair(self.C_HEADER) | curses.A_BOLD)
 
         # Watermark / branding in bottom-right corner
@@ -1076,6 +1087,10 @@ class SentinelTUI:
             self.set_status("Stream PAUSED" if self.paused else "Stream RESUMED")
 
         elif key in (ord("c"), ord("C")):
+            # Show live configuration manager modal
+            self._show_config_modal(stdscr)
+
+        elif key in (ord("l"), ord("L")):
             # Clear expired / unbanned records from memory
             removed = self.firewall.clear_expired()
             self.set_status(f"Cleaned {removed} expired record(s) from display.")
@@ -2172,4 +2187,336 @@ class SentinelTUI:
                 line = f"  {c_tag:<6s} {count:>6d}  {pct:>6.1f}%"
                 stdscr.addstr(y, 1, line[:max_w], self.C_WARN)
                 y += 1
+
+    def _show_config_modal(self, stdscr) -> None:
+        """Display interactive live configuration manager modal."""
+        prev_running = self.running
+        prev_status = self.status_msg
+
+        selected_idx = 0
+
+        while True:
+            stdscr.erase()
+            max_y, max_x = stdscr.getmaxyx()
+            if max_y < 16 or max_x < 65:
+                self.set_status("Pantalla demasiado pequeña para el gestor de configuración.")
+                break
+
+            title = " [ PANEL DE CONFIGURACIÓN Y HOT-RELOAD EN VIVO ] "
+            stdscr.addstr(1, max(0, (max_x - len(title)) // 2), title, curses.color_pair(self.C_HEADER) | curses.A_BOLD)
+
+            cfg_file = getattr(self.config, "resolved_config_path", self.config.config_path)
+            file_info = f"Archivo: {cfg_file}"[:max_x - 4]
+            stdscr.addstr(2, 4, file_info, curses.color_pair(self.C_MUTED))
+            stdscr.addstr(3, 2, "─" * (max_x - 4), curses.color_pair(self.C_MUTED))
+
+            whitelist_count = len(getattr(self.config, "whitelist_raw", []))
+            ignored_count = len(getattr(self.config, "ignored_paths", []))
+            mode_sub = "ACTIVO (/24)" if getattr(self.config, "ban_subnet", True) else "DESACTIVADO (IP única)"
+            mode_dry = "SIMULACIÓN (Dry-Run)" if getattr(self.firewall, "dry_run", True) else f"EN VIVO ({getattr(self.firewall, 'active_backend', 'fw').upper()})"
+
+            options = [
+                ("whitelist", f"1. Whitelist de IPs y Subredes ({whitelist_count} configuradas)", "Ver, añadir o eliminar IPs/CIDRs permitidas"),
+                ("ignored_paths", f"2. Ignored Paths - Rutas Exentas ({ignored_count} configuradas)", "Eximir URLs legítimas (Nextcloud, APIs) de rate-limit y baneos"),
+                ("th_404", f"3. Umbral 404 (threshold_404): {self.config.threshold_404} peticiones", "Peticiones 404 en ventana para desencadenar baneo"),
+                ("th_403", f"4. Umbral 403 (threshold_403): {self.config.threshold_403} peticiones", "Peticiones 403 en ventana para desencadenar baneo"),
+                ("window", f"5. Ventana de Tiempo (window_seconds): {self.config.window_seconds}s", "Segundos en los que se acumulan errores 404/403"),
+                ("ban_duration", f"6. Duración del Baneo (default_ban_duration): {self.config.default_ban_duration}s", "Tiempo predeterminado de bloqueo en el cortafuegos"),
+                ("ban_subnet", f"7. Modo Baneo Subred (ban_subnet): {mode_sub}", "Alternar entre banear toda la subred /24 o solo la IP"),
+                ("probe_threshold", f"8. Watchdog Slow Scanners (probe_ban_threshold): {getattr(self.config, 'probe_ban_threshold', 100)}", "Umbral de escaneos lentos acumulados en horizonte largo"),
+                ("probe_window", f"9. Ventana Slow Scanners (probe_ban_window): {getattr(self.config, 'probe_ban_window', 86400)}s", "Ventana de tiempo para cazador de escáneres lentos"),
+                ("dry_run", f"10. Modo Cortafuegos: {mode_dry}", "Alternar entre modo simulación seguro y cortafuegos real"),
+                ("reload_disk", "11. 🔄 Recargar config.json desde disco", "Forzar lectura inmediata del archivo config.json"),
+                ("clear_expired", "12. 🧹 Limpiar registros expirados de pantalla", "Eliminar de la vista los baneos ya expirados"),
+            ]
+
+            display_count = min(len(options), max_y - 8)
+            for i in range(display_count):
+                opt_key, opt_title, _ = options[i]
+                y = 4 + i
+                prefix = "> " if i == selected_idx else "  "
+                line = f"{prefix}{opt_title}"[:max_x - 6]
+                if i == selected_idx:
+                    stdscr.addstr(y, 4, line, curses.color_pair(self.C_SUCCESS) | curses.A_REVERSE | curses.A_BOLD)
+                else:
+                    stdscr.addstr(y, 4, line, curses.color_pair(self.C_DEFAULT))
+
+            desc_y = 4 + display_count + 1
+            if desc_y < max_y - 2:
+                _, _, cur_desc = options[selected_idx]
+                stdscr.addstr(desc_y, 4, f"Info: {cur_desc}"[:max_x - 6], curses.color_pair(self.C_INFO))
+
+            footer_y = max_y - 2
+            stdscr.addstr(footer_y - 1, 2, "─" * (max_x - 4), curses.color_pair(self.C_MUTED))
+            stdscr.addstr(footer_y, 4, "↑/↓ Navegar  |  [Enter] Editar/Cambiar  |  [Esc/Q] Salir al Monitor", curses.color_pair(self.C_WARN) | curses.A_BOLD)
+
+            stdscr.refresh()
+            k = stdscr.getch()
+
+            if k in (ord('q'), ord('Q'), 27):
+                break
+            elif k in (curses.KEY_UP, ord('k')) and selected_idx > 0:
+                selected_idx -= 1
+            elif k in (curses.KEY_DOWN, ord('j')) and selected_idx < len(options) - 1:
+                selected_idx += 1
+            elif k in (curses.KEY_ENTER, 10, 13):
+                chosen_action = options[selected_idx][0]
+                self._handle_config_action(stdscr, chosen_action)
+
+        self.running = prev_running
+        self.status_msg = prev_status
+
+    def _handle_config_action(self, stdscr, action: str) -> None:
+        """Handle individual config menu item actions."""
+        if action == "whitelist":
+            self._show_config_whitelist_modal(stdscr)
+        elif action == "ignored_paths":
+            self._show_config_ignored_paths_modal(stdscr)
+        elif action == "th_404":
+            cur = self.config.threshold_404
+            inp = self._prompt_input(stdscr, f"Nuevo umbral 404 (actual: {cur}): ", str(cur))
+            if inp:
+                try:
+                    v = int(inp.strip())
+                    if self.config.update_setting("threshold_404", v, persist=True):
+                        self.detector.reload_rules()
+                        self.set_status(f"threshold_404 actualizado a {v}")
+                    else:
+                        self.set_status("Valor no válido para threshold_404 (debe ser >= 1).")
+                except ValueError:
+                    self.set_status("Introduce un número entero válido.")
+        elif action == "th_403":
+            cur = self.config.threshold_403
+            inp = self._prompt_input(stdscr, f"Nuevo umbral 403 (actual: {cur}): ", str(cur))
+            if inp:
+                try:
+                    v = int(inp.strip())
+                    if self.config.update_setting("threshold_403", v, persist=True):
+                        self.detector.reload_rules()
+                        self.set_status(f"threshold_403 actualizado a {v}")
+                    else:
+                        self.set_status("Valor no válido para threshold_403 (debe ser >= 1).")
+                except ValueError:
+                    self.set_status("Introduce un número entero válido.")
+        elif action == "window":
+            cur = self.config.window_seconds
+            inp = self._prompt_input(stdscr, f"Nueva ventana en segundos (actual: {cur}): ", str(cur))
+            if inp:
+                try:
+                    v = int(inp.strip())
+                    if self.config.update_setting("window_seconds", v, persist=True):
+                        self.detector.reload_rules()
+                        self.set_status(f"window_seconds actualizado a {v}s")
+                    else:
+                        self.set_status("Valor no válido para window_seconds (debe ser >= 1).")
+                except ValueError:
+                    self.set_status("Introduce un número entero válido.")
+        elif action == "ban_duration":
+            cur = self.config.default_ban_duration
+            inp = self._prompt_input(stdscr, f"Nueva duración de baneo en seg (actual: {cur}): ", str(cur))
+            if inp:
+                try:
+                    v = int(inp.strip())
+                    if self.config.update_setting("default_ban_duration", v, persist=True):
+                        self.set_status(f"default_ban_duration actualizado a {v}s")
+                    else:
+                        self.set_status("Valor no válido para default_ban_duration (debe ser >= 1).")
+                except ValueError:
+                    self.set_status("Introduce un número entero válido.")
+        elif action == "ban_subnet":
+            new_val = not getattr(self.config, "ban_subnet", True)
+            self.config.update_setting("ban_subnet", new_val, persist=True)
+            if hasattr(self.firewall, "ban_subnet"):
+                self.firewall.ban_subnet = new_val
+            self.set_status(f"Modo baneo subred: {'ACTIVO (/24)' if new_val else 'DESACTIVADO (IP)'}")
+        elif action == "probe_threshold":
+            cur = getattr(self.config, "probe_ban_threshold", 100)
+            inp = self._prompt_input(stdscr, f"Nuevo umbral Slow Scanner (actual: {cur}, 0 para desactivar): ", str(cur))
+            if inp:
+                try:
+                    v = int(inp.strip())
+                    if self.config.update_setting("probe_ban_threshold", v, persist=True):
+                        self.set_status(f"probe_ban_threshold actualizado a {v}")
+                    else:
+                        self.set_status("Valor no válido (debe ser >= 0).")
+                except ValueError:
+                    self.set_status("Introduce un número entero válido.")
+        elif action == "probe_window":
+            cur = getattr(self.config, "probe_ban_window", 86400)
+            inp = self._prompt_input(stdscr, f"Nueva ventana Slow Scanner en seg (actual: {cur}): ", str(cur))
+            if inp:
+                try:
+                    v = int(inp.strip())
+                    if self.config.update_setting("probe_ban_window", v, persist=True):
+                        self.set_status(f"probe_ban_window actualizado a {v}s")
+                    else:
+                        self.set_status("Valor no válido (mínimo 60s).")
+                except ValueError:
+                    self.set_status("Introduce un número entero válido.")
+        elif action == "dry_run":
+            is_dry, status_msg = self.firewall.toggle_dry_run()
+            self.config.update_setting("dry_run", is_dry, persist=True)
+            self.set_status(status_msg)
+        elif action == "reload_disk":
+            self.config.load()
+            self.detector.reload_rules()
+            if hasattr(self.firewall, "whitelist_networks"):
+                self.firewall.whitelist_networks = list(self.config.whitelist_networks)
+            self.set_status("Configuración recargada forzosamente desde config.json.")
+        elif action == "clear_expired":
+            removed = self.firewall.clear_expired()
+            self.set_status(f"Limpiados {removed} registro(s) expirados de pantalla.")
+
+    def _show_config_whitelist_modal(self, stdscr) -> None:
+        """Submenu to view, add, and remove whitelist IP/CIDR entries."""
+        selected_idx = 0
+        scroll_offset = 0
+
+        while True:
+            stdscr.erase()
+            max_y, max_x = stdscr.getmaxyx()
+            if max_y < 12 or max_x < 50:
+                break
+
+            title = " [ GESTIÓN DE WHITELIST (IPs Y SUBREDES) ] "
+            stdscr.addstr(1, max(0, (max_x - len(title)) // 2), title, curses.color_pair(self.C_HEADER) | curses.A_BOLD)
+            stdscr.addstr(2, 2, "Las IPs/redes en whitelist nunca son bloqueadas por Sentinel."[:max_x - 4], curses.color_pair(self.C_MUTED))
+            stdscr.addstr(3, 2, "─" * (max_x - 4), curses.color_pair(self.C_MUTED))
+
+            items = self.config.whitelist_raw
+            display_count = min(len(items), max_y - 8)
+            if display_count < 1:
+                display_count = 1
+
+            if selected_idx < scroll_offset:
+                scroll_offset = selected_idx
+            elif selected_idx >= scroll_offset + display_count:
+                scroll_offset = selected_idx - display_count + 1
+
+            if not items:
+                stdscr.addstr(5, 4, "(No hay elementos en la lista blanca)", curses.color_pair(self.C_WARN))
+            else:
+                for i in range(display_count):
+                    list_idx = scroll_offset + i
+                    if list_idx >= len(items):
+                        break
+                    y = 5 + i
+                    item_str = items[list_idx]
+                    prefix = f"  {list_idx + 1:>2}. "
+                    line = f"{prefix}{item_str}"[:max_x - 6]
+                    if list_idx == selected_idx:
+                        stdscr.addstr(y, 4, line, curses.color_pair(self.C_SUCCESS) | curses.A_REVERSE | curses.A_BOLD)
+                    else:
+                        stdscr.addstr(y, 4, line, curses.color_pair(self.C_DEFAULT))
+
+            footer_y = max_y - 2
+            stdscr.addstr(footer_y - 1, 2, "─" * (max_x - 4), curses.color_pair(self.C_MUTED))
+            stdscr.addstr(footer_y, 4, "[A] Añadir IP/Red  |  [D/Supr] Eliminar  |  [Esc/Q] Volver", curses.color_pair(self.C_WARN) | curses.A_BOLD)
+
+            stdscr.refresh()
+            k = stdscr.getch()
+
+            if k in (ord('q'), ord('Q'), 27):
+                break
+            elif k in (curses.KEY_UP, ord('k')) and selected_idx > 0:
+                selected_idx -= 1
+            elif k in (curses.KEY_DOWN, ord('j')) and selected_idx < len(items) - 1:
+                selected_idx += 1
+            elif k in (ord('a'), ord('A')):
+                inp = self._prompt_input(stdscr, "IP o CIDR a añadir (ej: 192.168.1.100 o 10.0.0.0/8): ")
+                if inp:
+                    if self.config.add_whitelist(inp.strip(), persist=True):
+                        self.detector.reload_rules()
+                        if hasattr(self.firewall, "whitelist_networks"):
+                            self.firewall.whitelist_networks = list(self.config.whitelist_networks)
+                        self.set_status(f"Añadido a whitelist: {inp.strip()}")
+                    else:
+                        self.set_status(f"Error: '{inp.strip()}' no es una IP/red válida o ya existe.")
+            elif k in (ord('d'), ord('D'), curses.KEY_DC, 330):
+                if items and 0 <= selected_idx < len(items):
+                    to_remove = items[selected_idx]
+                    confirm = self._prompt_input(stdscr, f"¿Eliminar '{to_remove}' de whitelist? (s/N): ")
+                    if confirm.lower() in ("s", "si", "y", "yes"):
+                        self.config.remove_whitelist(to_remove, persist=True)
+                        self.detector.reload_rules()
+                        if hasattr(self.firewall, "whitelist_networks"):
+                            self.firewall.whitelist_networks = list(self.config.whitelist_networks)
+                        self.set_status(f"Eliminado de whitelist: {to_remove}")
+                        if selected_idx >= len(self.config.whitelist_raw):
+                            selected_idx = max(0, len(self.config.whitelist_raw) - 1)
+
+    def _show_config_ignored_paths_modal(self, stdscr) -> None:
+        """Submenu to view, add, and remove ignored URL paths/prefixes."""
+        selected_idx = 0
+        scroll_offset = 0
+
+        while True:
+            stdscr.erase()
+            max_y, max_x = stdscr.getmaxyx()
+            if max_y < 12 or max_x < 50:
+                break
+
+            title = " [ GESTIÓN DE IGNORED PATHS (RUTAS EXENTAS) ] "
+            stdscr.addstr(1, max(0, (max_x - len(title)) // 2), title, curses.color_pair(self.C_HEADER) | curses.A_BOLD)
+            stdscr.addstr(2, 2, "Rutas exentas de rate-limit (404/403) y bucles de baneo repetido."[:max_x - 4], curses.color_pair(self.C_MUTED))
+            stdscr.addstr(3, 2, "─" * (max_x - 4), curses.color_pair(self.C_MUTED))
+
+            items = getattr(self.config, "ignored_paths", [])
+            display_count = min(len(items), max_y - 8)
+            if display_count < 1:
+                display_count = 1
+
+            if selected_idx < scroll_offset:
+                scroll_offset = selected_idx
+            elif selected_idx >= scroll_offset + display_count:
+                scroll_offset = selected_idx - display_count + 1
+
+            if not items:
+                stdscr.addstr(5, 4, "(No hay rutas configuradas)", curses.color_pair(self.C_WARN))
+            else:
+                for i in range(display_count):
+                    list_idx = scroll_offset + i
+                    if list_idx >= len(items):
+                        break
+                    y = 5 + i
+                    item_str = items[list_idx]
+                    prefix = f"  {list_idx + 1:>2}. "
+                    line = f"{prefix}{item_str}"[:max_x - 6]
+                    if list_idx == selected_idx:
+                        stdscr.addstr(y, 4, line, curses.color_pair(self.C_SUCCESS) | curses.A_REVERSE | curses.A_BOLD)
+                    else:
+                        stdscr.addstr(y, 4, line, curses.color_pair(self.C_DEFAULT))
+
+            footer_y = max_y - 2
+            stdscr.addstr(footer_y - 1, 2, "─" * (max_x - 4), curses.color_pair(self.C_MUTED))
+            stdscr.addstr(footer_y, 4, "[A] Añadir Ruta  |  [D/Supr] Eliminar  |  [Esc/Q] Volver", curses.color_pair(self.C_WARN) | curses.A_BOLD)
+
+            stdscr.refresh()
+            k = stdscr.getch()
+
+            if k in (ord('q'), ord('Q'), 27):
+                break
+            elif k in (curses.KEY_UP, ord('k')) and selected_idx > 0:
+                selected_idx -= 1
+            elif k in (curses.KEY_DOWN, ord('j')) and selected_idx < len(items) - 1:
+                selected_idx += 1
+            elif k in (ord('a'), ord('A')):
+                inp = self._prompt_input(stdscr, "Ruta o prefijo a eximir (ej: /ocs/v2.php o /dav/): ")
+                if inp:
+                    if self.config.add_ignored_path(inp.strip(), persist=True):
+                        self.detector.reload_rules()
+                        self.set_status(f"Añadida ruta exenta: {inp.strip()}")
+                    else:
+                        self.set_status(f"Ruta ya existe o no válida: {inp.strip()}")
+            elif k in (ord('d'), ord('D'), curses.KEY_DC, 330):
+                if items and 0 <= selected_idx < len(items):
+                    to_remove = items[selected_idx]
+                    confirm = self._prompt_input(stdscr, f"¿Eliminar '{to_remove}' de rutas exentas? (s/N): ")
+                    if confirm.lower() in ("s", "si", "y", "yes"):
+                        self.config.remove_ignored_path(to_remove, persist=True)
+                        self.detector.reload_rules()
+                        self.set_status(f"Eliminada ruta exenta: {to_remove}")
+                        if selected_idx >= len(self.config.ignored_paths):
+                            selected_idx = max(0, len(self.config.ignored_paths) - 1)
+
 

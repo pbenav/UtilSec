@@ -37,6 +37,8 @@ class ConfigManager:
 
     def __init__(self, config_path: str = "config.json"):
         self.config_path = config_path
+        self.resolved_config_path: str = os.path.abspath(config_path) if os.path.exists(config_path) else config_path
+        self._last_mtime: float = 0.0
         self.raw_config: Dict[str, Any] = {}
         self.rules: List[Rule] = []
         self.whitelist_networks: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]] = []
@@ -44,58 +46,38 @@ class ConfigManager:
 
     def load(self) -> None:
         """Loads configuration from JSON file or sets defaults."""
-        # 1) Try given path as-is
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        alt_path = os.path.join(repo_root, self.config_path)
+        example_path = f"{self.config_path}.example"
+        example_repo = os.path.join(repo_root, f"{self.config_path}.example")
+
+        chosen_path = None
         if os.path.exists(self.config_path):
+            chosen_path = self.config_path
+        elif os.path.exists(alt_path):
+            chosen_path = alt_path
+        elif os.path.exists(example_path):
+            chosen_path = example_path
+        elif os.path.exists(example_repo):
+            chosen_path = example_repo
+
+        if chosen_path:
             try:
-                with open(self.config_path, "r", encoding="utf-8") as f:
+                with open(chosen_path, "r", encoding="utf-8") as f:
                     self.raw_config = json.load(f)
-                logging.getLogger("UtilSec.Config").info("Loaded configuration from %s", self.config_path)
+                self.resolved_config_path = os.path.abspath(chosen_path)
+                try:
+                    self._last_mtime = os.path.getmtime(self.resolved_config_path)
+                except OSError:
+                    pass
+                logging.getLogger("UtilSec.Config").info("Loaded configuration from %s", chosen_path)
             except Exception as e:
                 logging.getLogger("UtilSec.Config").warning(
-                    "Error loading %s: %s. Using fallback defaults.", self.config_path, e
+                    "Error loading %s: %s. Using fallback defaults.", chosen_path, e
                 )
                 self.raw_config = {}
         else:
-            # 2) Try repo-relative path (useful when sentinel is started from another CWD)
-            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-            alt_path = os.path.join(repo_root, self.config_path)
-            if os.path.exists(alt_path):
-                try:
-                    with open(alt_path, "r", encoding="utf-8") as f:
-                        self.raw_config = json.load(f)
-                    logging.getLogger("UtilSec.Config").info("Loaded configuration from %s", alt_path)
-                except Exception as e:
-                    logging.getLogger("UtilSec.Config").warning(
-                        "Error loading %s: %s. Using fallback defaults.", alt_path, e
-                    )
-                    self.raw_config = {}
-            else:
-                # 3) Try trailing .example next to requested path or repo root
-                example_path = f"{self.config_path}.example"
-                if os.path.exists(example_path):
-                    try:
-                        with open(example_path, "r", encoding="utf-8") as f:
-                            self.raw_config = json.load(f)
-                        logging.getLogger("UtilSec.Config").info("Loaded configuration from %s", example_path)
-                    except Exception as e:
-                        logging.getLogger("UtilSec.Config").warning(
-                            "Error loading %s: %s. Using fallback defaults.", example_path, e
-                        )
-                        self.raw_config = {}
-                else:
-                    example_repo = os.path.join(repo_root, f"{self.config_path}.example")
-                    if os.path.exists(example_repo):
-                        try:
-                            with open(example_repo, "r", encoding="utf-8") as f:
-                                self.raw_config = json.load(f)
-                            logging.getLogger("UtilSec.Config").info("Loaded configuration from %s", example_repo)
-                        except Exception as e:
-                            logging.getLogger("UtilSec.Config").warning(
-                                "Error loading %s: %s. Using fallback defaults.", example_repo, e
-                            )
-                            self.raw_config = {}
-                    else:
-                        self.raw_config = {}
+            self.raw_config = {}
 
         # Set default values if missing
         self.log_file = self.raw_config.get("log_file", "logs")
@@ -341,12 +323,13 @@ class ConfigManager:
         silently fell back to defaults - losing the whitelist, which is exactly
         what stops the server from banning itself.
         """
-        directory = os.path.dirname(os.path.abspath(self.config_path)) or "."
+        target_path = getattr(self, "resolved_config_path", self.config_path) or self.config_path
+        directory = os.path.dirname(os.path.abspath(target_path)) or "."
         tmp_path = None
         try:
             mode = 0o644
             try:
-                mode = os.stat(self.config_path).st_mode & 0o777
+                mode = os.stat(target_path).st_mode & 0o777
             except OSError:
                 pass
 
@@ -356,8 +339,12 @@ class ConfigManager:
                 f.flush()
                 os.fsync(f.fileno())
             os.chmod(tmp_path, mode)
-            os.replace(tmp_path, self.config_path)
+            os.replace(tmp_path, target_path)
             tmp_path = None
+            try:
+                self._last_mtime = os.path.getmtime(target_path)
+            except OSError:
+                pass
 
             # Persist the rename itself, not just the file contents.
             try:
@@ -376,4 +363,103 @@ class ConfigManager:
                     os.unlink(tmp_path)
                 except OSError:
                     pass
+
+    def add_whitelist(self, ip_or_net: str, persist: bool = True) -> bool:
+        """Add an IP or CIDR network to the whitelist."""
+        normalized = parse_ip_or_network(ip_or_net)
+        if not normalized:
+            return False
+        if normalized not in self.whitelist_raw:
+            self.whitelist_raw.append(normalized)
+            self.raw_config["whitelist"] = list(self.whitelist_raw)
+            self._parse_whitelist()
+            if persist:
+                self.save()
+            return True
+        return False
+
+    def remove_whitelist(self, ip_or_net: str, persist: bool = True) -> bool:
+        """Remove an IP or CIDR network from the whitelist."""
+        normalized = parse_ip_or_network(ip_or_net)
+        target = normalized or (ip_or_net.strip() if isinstance(ip_or_net, str) else "")
+        if target and target in self.whitelist_raw:
+            self.whitelist_raw.remove(target)
+            self.raw_config["whitelist"] = list(self.whitelist_raw)
+            self._parse_whitelist()
+            if persist:
+                self.save()
+            return True
+        return False
+
+    def update_setting(self, key: str, value: Any, persist: bool = True) -> bool:
+        """Update a configuration setting in memory and optionally persist to disk."""
+        int_fields = {
+            "default_ban_duration": (1, 86400 * 365),
+            "threshold_404": (1, 100000),
+            "threshold_403": (1, 100000),
+            "window_seconds": (1, 86400 * 7),
+            "probe_ban_threshold": (0, 1000000),
+            "probe_ban_window": (60, 86400 * 365),
+            "subnet_cidr_ipv4": (8, 32),
+            "subnet_cidr_ipv6": (16, 128),
+        }
+        if key in int_fields:
+            try:
+                val = int(value)
+                min_v, max_v = int_fields[key]
+                if not (min_v <= val <= max_v):
+                    return False
+                setattr(self, key, val)
+                self.raw_config[key] = val
+            except (ValueError, TypeError):
+                return False
+        elif key in ("ban_subnet", "dry_run"):
+            val = bool(value)
+            setattr(self, key, val)
+            self.raw_config[key] = val
+        elif key in ("firewall_backend", "log_file"):
+            val = str(value).strip()
+            if not val:
+                return False
+            setattr(self, key, val)
+            self.raw_config[key] = val
+        else:
+            setattr(self, key, value)
+            self.raw_config[key] = value
+
+        if persist:
+            self.save()
+        return True
+
+    def check_and_reload_if_modified(self) -> bool:
+        """Check if the configuration file has been modified externally and reload if so.
+
+        Returns True if a valid modification was detected and loaded, False otherwise.
+        """
+        target_path = getattr(self, "resolved_config_path", self.config_path)
+        if not target_path or not os.path.exists(target_path):
+            return False
+        try:
+            mtime = os.path.getmtime(target_path)
+        except OSError:
+            return False
+
+        if mtime <= getattr(self, "_last_mtime", 0.0):
+            return False
+
+        # Verify that the file contains valid JSON before loading
+        try:
+            with open(target_path, "r", encoding="utf-8") as f:
+                new_data = json.load(f)
+            if not isinstance(new_data, dict):
+                return False
+        except Exception as e:
+            logging.getLogger("UtilSec.Config").warning(
+                "External change detected on %s, but file contains invalid JSON (%s). Retaining active config.",
+                target_path, e
+            )
+            return False
+
+        self.load()
+        return True
 
