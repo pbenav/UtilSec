@@ -132,6 +132,11 @@ class ConfigManager:
         self.subnet_cidr_ipv4 = int(self.raw_config.get("subnet_cidr_ipv4", 24))
         self.subnet_cidr_ipv6 = int(self.raw_config.get("subnet_cidr_ipv6", 64))
 
+        # Ignored paths: list of URL substrings/prefixes exempt from 404/403 rate-limiting and repeat-attack bans
+        self.ignored_paths: List[str] = [
+            str(p).strip().lower() for p in self.raw_config.get("ignored_paths", []) if str(p).strip()
+        ]
+
         # Parse whitelist
         self.whitelist_raw = self.raw_config.get("whitelist", [
             "127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"
@@ -264,6 +269,43 @@ class ConfigManager:
             self.raw_config["user_patterns"] = patterns
             self.save()
             self._build_rules()
+            return True
+        return False
+
+    def is_path_ignored(self, url: str) -> bool:
+        """Check if a URL matches any configured ignored path."""
+        if not getattr(self, "ignored_paths", None) or not url:
+            return False
+        url_lower = url.lower()
+        return any(ignored in url_lower for ignored in self.ignored_paths)
+
+    def add_ignored_path(self, path: str, persist: bool = False) -> bool:
+        """Add a path to ignored_paths and optionally persist changes."""
+        path_clean = path.strip().lower()
+        if not path_clean:
+            return False
+        if path_clean not in self.ignored_paths:
+            self.ignored_paths.append(path_clean)
+            if persist:
+                raw_paths = self.raw_config.get("ignored_paths", [])
+                if path.strip() not in raw_paths:
+                    raw_paths.append(path.strip())
+                self.raw_config["ignored_paths"] = raw_paths
+                self.save()
+            return True
+        return False
+
+    def remove_ignored_path(self, path: str, persist: bool = False) -> bool:
+        """Remove a path from ignored_paths and optionally persist changes."""
+        path_clean = path.strip().lower()
+        if not path_clean:
+            return False
+        if path_clean in self.ignored_paths:
+            self.ignored_paths.remove(path_clean)
+            if persist:
+                raw_paths = [p for p in self.raw_config.get("ignored_paths", []) if p.strip().lower() != path_clean]
+                self.raw_config["ignored_paths"] = raw_paths
+                self.save()
             return True
         return False
 

@@ -24,6 +24,11 @@
     "172.16.0.0/12",
     "192.168.0.0/16"
   ],
+  "ignored_paths": [
+    "/ocs/v2.php/",
+    "/remote.php/",
+    "/index.php/core/preview"
+  ],
   "user_patterns": [
     "/admin.php",
     "/phpmyadmin",

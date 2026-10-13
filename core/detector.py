@@ -110,6 +110,9 @@ class AttackDetector:
         if now - self._last_history_sweep >= HISTORY_SWEEP_INTERVAL:
             self._sweep_histories(now)
 
+        # Check if path is in ignored paths list
+        is_ignored_path = self.config.is_path_ignored(url)
+
         # 1. Match against configured rules and AI heuristics
         for rule, comp_regex in self.compiled_rules:
             matched = False
@@ -140,7 +143,8 @@ class AttackDetector:
                 return event, False, ""
 
         # 1b. If the host is already known to be banned, any probe/error is a confirmed repeat attack!
-        if is_banned and status_code in (400, 401, 403, 404, 405, 500):
+        # Legitimate paths are exempt so normal application traffic does not refresh the ban.
+        if is_banned and status_code in (400, 401, 403, 404, 405, 500) and not is_ignored_path:
             self.total_attacks_detected += 1
             event = AttackEvent(
                 ip=ip,
@@ -170,7 +174,7 @@ class AttackDetector:
             is_crawler = True
 
         # 2. HTTP 403 Forbidden Access Handling (Default: Instant ban on 1st attempt!)
-        if status_code == 403 and not is_crawler:
+        if status_code == 403 and not is_crawler and not is_ignored_path:
             history = self.ip_403_history[ip]
             cutoff = now - self.config.window_seconds
             while history and history[0] < cutoff:
@@ -215,7 +219,7 @@ class AttackDetector:
             is_static_asset = True
 
         # 3. HTTP 404 Not Found Rate Limiting (Default: Strict threshold of 2 attempts)
-        if status_code == 404 and not is_crawler and not is_static_asset:
+        if status_code == 404 and not is_crawler and not is_static_asset and not is_ignored_path:
             history = self.ip_404_history[ip]
             cutoff = now - self.config.window_seconds
             while history and history[0] < cutoff:
