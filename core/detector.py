@@ -1,6 +1,7 @@
 """Attack detection engine evaluating rules, heuristics, and 404 rate-limiting."""
 
 import collections
+from datetime import datetime
 import re
 import time
 from typing import Deque, Dict, List, Optional, Tuple
@@ -32,6 +33,7 @@ class AttackDetector:
         self.total_404s = 0
         self.total_403s = 0
         self.total_attacks_detected = 0
+        self.started_at: datetime = datetime.now()
         self._last_history_sweep = time.time()
 
     def _sweep_histories(self, now: float) -> None:
@@ -78,6 +80,7 @@ class AttackDetector:
         self.total_404s = 0
         self.total_403s = 0
         self.total_attacks_detected = 0
+        self.started_at = datetime.now()
         self.ip_404_history.clear()
         self.ip_403_history.clear()
 

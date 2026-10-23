@@ -123,6 +123,7 @@ class AttackAnalytics:
             "active_bans": active_bans,
             "total_banned": total_banned,
             "unique_ips": unique_ips,
+            "started_at": getattr(self.detector, "started_at", None),
         }
 
     def get_category_breakdown(self) -> List[Tuple[str, int, float]]:

@@ -779,3 +779,37 @@ class TestSentinelCore(unittest.TestCase):
             unban_cmd = next((c for c in unban_called_cmds if "UTILSEC-BAN" in c and "-D" in c), None)
             self.assertIsNotNone(unban_cmd, "Unban command must target UTILSEC-BAN chain")
             self.assertIn("DROP", unban_cmd)
+
+    def test_exec_ban_system_captures_error_message(self):
+        """When the firewall subprocess command fails, status must be ERROR and error_message populated."""
+        import subprocess
+        from unittest.mock import patch, MagicMock
+        fw = FirewallManager(backend="iptables", dry_run=True)
+        fw.active_backend = "iptables"
+        fw.dry_run = False
+        rec = BanRecord(
+            ip="198.51.100.0/24",
+            reason="Attack Signature: Exploit",
+            matched_pattern="exploit",
+            attack_count=1,
+            banned_at=time.time(),
+            ban_duration=3600,
+            backend="iptables"
+        )
+        def mock_subprocess_run(cmd, *args, **kwargs):
+            if "-C" in cmd:
+                # check_cmd: rule does not exist
+                res = MagicMock()
+                res.returncode = 1
+                return res
+            # ban command throws CalledProcessError
+            raise subprocess.CalledProcessError(
+                returncode=1,
+                cmd=cmd,
+                stderr=b"sudo: a password is required\n"
+            )
+
+        with patch("subprocess.run", side_effect=mock_subprocess_run):
+            fw._exec_ban_system(rec)
+            self.assertEqual(rec.status, "ERROR")
+            self.assertIn("sudo: a password is required", rec.error_message)

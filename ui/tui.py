@@ -1,6 +1,7 @@
 """Terminal User Interface (TUI) for UtilSec Sentinel using standard curses."""
 
 import curses
+from datetime import datetime
 import os
 import sys
 import time
@@ -336,10 +337,10 @@ class SentinelTUI:
             stdscr.addstr(4, 2, " BANNED SUBNETS / ATTACKERS ", curses.color_pair(self.C_ALERT) | curses.A_BOLD)
             
             # Dynamic widths
-            reason_w = max(22, split_x - 46)
+            reason_w = max(20, split_x - 48)
             ip_w = max(18, min(24, split_x // 5))  # Give IP a bit more space if wide
             
-            tbl_hdr = f"  {'TARGET/SUBNET':<{ip_w+4}} {'REASON/RULE':<{reason_w}} {'HITS':<5} {'TTL':<8} {'STATUS':<8}"
+            tbl_hdr = f"  {'TARGET/SUBNET':<{ip_w+4}} {'REASON/RULE':<{reason_w}} {'HITS':<5} {'TTL':<7} {'STATUS':<7}"
             stdscr.addstr(5, 1, tbl_hdr[: split_x - 1], curses.color_pair(self.C_DEFAULT) | curses.A_UNDERLINE)
 
             # Draw Banned IPs Table
@@ -363,7 +364,7 @@ class SentinelTUI:
                     is_sel = abs_i == self.selected_idx
 
                     rem = f"{ban.remaining_seconds}s" if ban.ban_duration > 0 else "PERM"
-                    reason_w = max(22, split_x - 46)
+                    reason_w = max(20, split_x - 48)
                     ip_w = max(18, min(24, split_x // 5))
                     
                     rule_disp = ban.reason
@@ -372,7 +373,7 @@ class SentinelTUI:
                     
                     c_code = getattr(ban, "country", "??")
                     display_ip = f"[{c_code}] {ban.ip}"
-                    line_str = f" {display_ip:<{ip_w+4}} {rule_disp:<{reason_w}} {ban.attack_count:<5} {rem:<8} {ban.status:<8}"
+                    line_str = f" {display_ip:<{ip_w+4}} {rule_disp:<{reason_w}} {ban.attack_count:<5} {rem:<7} {ban.status:<7}"
                     line_str = line_str[: split_x - 1].ljust(split_x - 1)
 
                     attr = curses.A_REVERSE if is_sel else curses.A_NORMAL
@@ -491,10 +492,15 @@ class SentinelTUI:
 
 
         # Status Line (Line max_y - 2)
-        stdscr.addstr(max_y - 2, 1, f"STATUS: {self.status_msg}"[: max_x - 2], curses.color_pair(self.C_INFO))
+        selected_ban = bans_list[self.selected_idx] if (bans_list and 0 <= self.selected_idx < len(bans_list)) else None
+        if selected_ban and selected_ban.status == "ERROR":
+            err_detail = selected_ban.error_message or "Fallo en cortafuegos (revisar sudo / iptables)"
+            stdscr.addstr(max_y - 2, 1, f"⚠️ ERROR en {selected_ban.ip}: {err_detail} [Enter: detalles]"[: max_x - 2], curses.color_pair(self.C_WARN) | curses.A_BOLD)
+        else:
+            stdscr.addstr(max_y - 2, 1, f"STATUS: {self.status_msg}"[: max_x - 2], curses.color_pair(self.C_INFO))
 
         # Hotkeys Bar (Line max_y - 1)
-        help_bar = "[Q]uit [0-9]Scr [Tab]View [M]ode [C]onfig [W]AF [B]an [u]nban [A]Rule [D]el [E]stats [P]ause [I]Info"
+        help_bar = "[Q]uit [0-9]Scr [Tab]View [M]ode [C]onfig [W]AF [B]an [u]nban [Enter]Detalle [A]Rule [D]el [E]stats [P]ause [I]Info"
         stdscr.addstr(max_y - 1, 0, help_bar[: max_x - 1], curses.color_pair(self.C_HEADER) | curses.A_BOLD)
 
         # Watermark / branding in bottom-right corner
@@ -940,6 +946,11 @@ class SentinelTUI:
             if self.selected_idx < bans_count - 1:
                 self.selected_idx += 1
 
+        elif key in (curses.KEY_ENTER, 10, 13):
+            bans = self.firewall.get_active_bans_list()
+            if bans and 0 <= self.selected_idx < len(bans):
+                self._show_ban_detail_modal(stdscr, bans[self.selected_idx])
+
         elif key == ord("u"):
             # Prompt for IP to unban, defaulting to the selected one
             bans = self.firewall.get_active_bans_list()
@@ -1101,6 +1112,91 @@ class SentinelTUI:
         elif key in (ord("i"), ord("I")):
             # Show copyright / about modal
             self._show_about_modal(stdscr)
+
+    def _show_ban_detail_modal(self, stdscr, ban: BanRecord) -> None:
+        """Display detailed modal for a specific banned/errored IP or subnet."""
+        max_y, max_x = stdscr.getmaxyx()
+        if max_y < 14 or max_x < 55:
+            self.set_status("Screen too small for detail modal.")
+            return
+
+        modal_w = min(78, max_x - 4)
+        modal_h = min(17, max_y - 4)
+        modal_y = max(1, (max_y - modal_h) // 2)
+        modal_x = max(1, (max_x - modal_w) // 2)
+
+        while True:
+            # Clear modal area
+            for r in range(modal_y, modal_y + modal_h):
+                stdscr.addstr(r, modal_x, " " * modal_w, curses.color_pair(self.C_MUTED))
+
+            # Header
+            header_title = f" DETALLES DE BLOQUEO: {ban.ip} "
+            header_color = self.C_WARN if ban.status == "ERROR" else self.C_ALERT
+            stdscr.addstr(modal_y, modal_x + 2, header_title[:modal_w - 4], curses.color_pair(header_color) | curses.A_BOLD)
+            stdscr.addstr(modal_y + 1, modal_x + 1, "─" * (modal_w - 2), curses.color_pair(self.C_MUTED))
+
+            # Format info lines
+            c_code = getattr(ban, "country", "??")
+            rem = f"{ban.remaining_seconds}s" if ban.ban_duration > 0 else "PERMANENTE"
+            banned_time = datetime.fromtimestamp(ban.banned_at).strftime("%d/%m/%Y %H:%M:%S")
+
+            lines = [
+                f"  Objetivo/Subred:   {ban.ip} [{c_code}]",
+                f"  Estado actual:     {ban.status} (Backend: {ban.backend})",
+                f"  Motivo / Regla:    {ban.reason}",
+                f"  Patrón detectado:  {ban.matched_pattern}",
+                f"  Ataques / Hits:    {ban.attack_count}",
+                f"  Fecha de baneo:    {banned_time} (TTL restante: {rem})",
+            ]
+            if ban.last_url:
+                lines.append(f"  Última URL:        {ban.last_url[:modal_w - 24]}")
+
+            curr_y = modal_y + 2
+            for line in lines:
+                if curr_y < modal_y + modal_h - 4:
+                    stdscr.addstr(curr_y, modal_x + 1, line[:modal_w - 2], curses.color_pair(self.C_DEFAULT))
+                    curr_y += 1
+
+            # If ERROR, show explanation and error message
+            if ban.status == "ERROR":
+                curr_y += 1
+                if curr_y < modal_y + modal_h - 3:
+                    err_label = f"  ⚠️ ERROR CORTAFUEGOS: {ban.error_message or 'Fallo al ejecutar iptables/nft/ufw'}"
+                    stdscr.addstr(curr_y, modal_x + 1, err_label[:modal_w - 2], curses.color_pair(self.C_ALERT) | curses.A_BOLD)
+                    curr_y += 1
+                if curr_y < modal_y + modal_h - 2:
+                    note = "  Nota: Regla NO activa en el kernel (las peticiones siguen entrando)."
+                    stdscr.addstr(curr_y, modal_x + 1, note[:modal_w - 2], curses.color_pair(self.C_WARN))
+                    curr_y += 1
+
+            # Footer
+            footer_y = modal_y + modal_h - 2
+            help_str = " [R] Reintentar bloqueo   [U] Desbanear   [Esc/Enter] Cerrar "
+            stdscr.addstr(footer_y, modal_x + 2, help_str[:modal_w - 4], curses.color_pair(self.C_HEADER) | curses.A_BOLD)
+
+            stdscr.refresh()
+            k = stdscr.getch()
+            if k in (27, 10, 13, ord("q"), ord("Q")):
+                break
+            elif k in (ord("r"), ord("R")):
+                # Retry ban
+                self.firewall.ban_ip(
+                    ip=ban.ip,
+                    reason=ban.reason,
+                    matched_pattern=ban.matched_pattern,
+                    duration=ban.ban_duration,
+                    config=self.config,
+                )
+                if ban.status != "ERROR":
+                    self.set_status(f"Bloqueo reintentado con éxito para {ban.ip}")
+                else:
+                    self.set_status(f"⚠️ Reintento falló para {ban.ip}: {ban.error_message}")
+                break
+            elif k in (ord("u"), ord("U")):
+                self.firewall.unban_anywhere(ban.ip)
+                self.set_status(f"Desbaneado: {ban.ip}")
+                break
 
     def _show_about_modal(self, stdscr) -> None:
         """Display copyright / about information modal."""
@@ -1774,7 +1870,25 @@ class SentinelTUI:
 
         # ----------------- Columna 1 (Izquierda) -----------------
         # 1. Resumen General
-        box1_h = min(8, avail_h * 2 // 5)
+        started_at = overall.get("started_at")
+        since_str = ""
+        if started_at:
+            if isinstance(started_at, datetime):
+                s_date = started_at.strftime("%d/%m/%Y %H:%M:%S")
+                elapsed = int(time.time() - started_at.timestamp())
+                if elapsed < 60:
+                    dur = f"{elapsed}s"
+                elif elapsed < 3600:
+                    dur = f"{elapsed // 60}m"
+                elif elapsed < 86400:
+                    dur = f"{elapsed // 3600}h {(elapsed % 3600) // 60}m"
+                else:
+                    dur = f"{elapsed // 86400}d {(elapsed % 86400) // 3600}h"
+                since_str = f"  Contabilizando desde:  {s_date} (hace {dur})"
+            else:
+                since_str = f"  Contabilizando desde:  {started_at}"
+
+        box1_h = min(9 if since_str else 8, max(6, avail_h * 2 // 5))
         stdscr.addstr(start_y, col1_x, "── RESUMEN GENERAL " + "─" * max(0, col1_w - 19), curses.color_pair(self.C_INFO) | curses.A_BOLD)
         stat_rows = [
             f"  Peticiones analizadas: {total_analyzed:,}",
@@ -1785,10 +1899,15 @@ class SentinelTUI:
             f"  IPs bloqueadas:        {active_bans:,} activas (Total: {total_banned:,})",
             f"  IPs atacantes únicas:  {unique_ips:,}",
         ]
+        if since_str:
+            stat_rows.append(since_str)
+
         for i, text in enumerate(stat_rows[: box1_h - 1]):
             color = self.C_ALERT if "Ataques" in text and total_attacks > 0 else self.C_DEFAULT
             if "Tasa" in text and attack_rate > 10.0:
                 color = self.C_WARN
+            elif "Contabilizando" in text:
+                color = self.C_INFO
             stdscr.addstr(start_y + 1 + i, col1_x, text[:col1_w], color)
 
         # 2. Categorías de Ataque
@@ -2142,6 +2261,24 @@ class SentinelTUI:
         stdscr.addstr(y, 1, "── RESUMEN GENERAL ──────────────────────────────────────"[:max_w], curses.color_pair(self.C_INFO) | curses.A_BOLD)
         y += 1
 
+        started_at = overall.get("started_at")
+        since_str = ""
+        if started_at:
+            if isinstance(started_at, datetime):
+                s_date = started_at.strftime("%d/%m/%Y %H:%M:%S")
+                elapsed = int(time.time() - started_at.timestamp())
+                if elapsed < 60:
+                    dur = f"{elapsed}s"
+                elif elapsed < 3600:
+                    dur = f"{elapsed // 60}m"
+                elif elapsed < 86400:
+                    dur = f"{elapsed // 3600}h {(elapsed % 3600) // 60}m"
+                else:
+                    dur = f"{elapsed // 86400}d {(elapsed % 86400) // 3600}h"
+                since_str = f"  Contabilizando desde:  {s_date} ({dur})"
+            else:
+                since_str = f"  Contabilizando desde:  {started_at}"
+
         stat_lines = [
             f"  Peticiones analizadas: {total_analyzed:,}",
             f"  Ataques (histórico):    {total_attacks:,} (Sesión: {session_attacks:,})",
@@ -2149,9 +2286,15 @@ class SentinelTUI:
             f"  Tasa de ataque:        {attack_rate:.1f}%",
             f"  Errores 404 / 403:     {total_404:,} / {total_403:,}",
         ]
+        if since_str:
+            stat_lines.append(since_str)
+
         for line in stat_lines:
             if y <= end_y:
-                stdscr.addstr(y, 1, line[:max_w], self.C_ALERT if "Ataques" in line and total_attacks > 0 else self.C_DEFAULT)
+                color = self.C_ALERT if "Ataques" in line and total_attacks > 0 else self.C_DEFAULT
+                if "Contabilizando" in line:
+                    color = self.C_INFO
+                stdscr.addstr(y, 1, line[:max_w], color)
                 y += 1
 
         y += 1

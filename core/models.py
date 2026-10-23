@@ -36,6 +36,7 @@ class BanRecord:
     backend: str = "dry-run"
     last_url: str = ""
     country: str = "??"
+    error_message: str = ""
 
     @property
     def unban_at(self) -> float:

@@ -156,9 +156,16 @@ def main():
     tui_ref = [None]  # holder for TUI instance
 
     def on_ban_change(record: BanRecord, action: str):
-        logger.info(f"[{action}] IP {record.ip} - Reason: {record.reason} (Backend: {record.backend})")
-        if tui_ref[0]:
-            tui_ref[0].set_status(f"{action}: {record.ip} ({record.reason})")
+        if action == "ERROR" or record.status == "ERROR":
+            err_detail = f" - Error: {record.error_message}" if record.error_message else ""
+            logger.error(f"[BAN ERROR] IP {record.ip} - Reason: {record.reason}{err_detail}")
+            if tui_ref[0]:
+                msg = f"⚠️ ERROR AL BLOQUEAR {record.ip}: {record.error_message or 'Fallo al ejecutar cortafuegos'}"
+                tui_ref[0].set_status(msg)
+        else:
+            logger.info(f"[{action}] IP {record.ip} - Reason: {record.reason} (Backend: {record.backend})")
+            if tui_ref[0]:
+                tui_ref[0].set_status(f"{action}: {record.ip} ({record.reason})")
 
     firewall = FirewallManager(
         backend=config.firewall_backend,

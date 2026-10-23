@@ -188,6 +188,25 @@ class TestAnalytics(unittest.TestCase):
         self.assertIn("hourly_evolution", all_stats)
         self.assertIn("geolocation", all_stats)
 
+    def test_started_at_tracking_and_reset(self):
+        self.assertIsNotNone(self.detector.started_at)
+        self.assertIsInstance(self.detector.started_at, datetime)
+        
+        old_time = self.detector.started_at
+        time.sleep(0.01)
+        self.detector.reset_counters()
+        self.assertGreaterEqual(self.detector.started_at, old_time)
+
+        analytics = AttackAnalytics(
+            detector=self.detector,
+            recent_attacks=self.recent_attacks,
+            screen_attacks=self.screen_attacks,
+            storage=self.storage,
+        )
+        stats = analytics.get_overall_stats()
+        self.assertIn("started_at", stats)
+        self.assertEqual(stats["started_at"], self.detector.started_at)
+
 
 if __name__ == "__main__":
     unittest.main()

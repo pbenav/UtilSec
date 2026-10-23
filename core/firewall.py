@@ -720,7 +720,8 @@ class FirewallManager:
             self.storage.save_ban(record)
 
         if self.on_ban_change and created:
-            self.on_ban_change(record, "BAN")
+            action = "ERROR" if record.status == "ERROR" else "BAN"
+            self.on_ban_change(record, action)
 
         return True
 
@@ -1254,12 +1255,15 @@ class FirewallManager:
                     except Exception as fb_err:
                         logger.error("Fallback ban failed for %s: %s", ip, fb_err)
                         record.status = "ERROR"
+                        record.error_message = f"Fallback error: {fb_err}"
                 else:
                     logger.error("Failed to execute ban on %s: %s (stderr: %s)", ip, e, err_msg)
                     record.status = "ERROR"
+                    record.error_message = err_msg or str(e)
             except Exception as e:
                 logger.error("Failed to execute ban on %s: %s", ip, e)
                 record.status = "ERROR"
+                record.error_message = str(e)
 
             # Kill existing active TCP connections (Keep-Alive) from banned IP/subnet
             if record.status != "ERROR":
