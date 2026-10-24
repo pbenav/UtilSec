@@ -114,6 +114,16 @@ class ConfigManager:
         self.subnet_cidr_ipv4 = int(self.raw_config.get("subnet_cidr_ipv4", 24))
         self.subnet_cidr_ipv6 = int(self.raw_config.get("subnet_cidr_ipv6", 64))
 
+        # Behavioral & Early-Stage Reconnaissance Configuration
+        self.behavioral_defense_enabled = bool(self.raw_config.get("behavioral_defense_enabled", True))
+        self.recon_window_seconds = int(self.raw_config.get("recon_window_seconds", 60))
+        self.suspicion_ban_threshold = float(self.raw_config.get("suspicion_ban_threshold", 100.0))
+        self.entropy_threshold = float(self.raw_config.get("entropy_threshold", 4.2))
+        self.entropy_min_param_len = int(self.raw_config.get("entropy_min_param_len", 14))
+        self.special_char_ratio_threshold = float(self.raw_config.get("special_char_ratio_threshold", 0.25))
+        self.burst_404_rate_limit = int(self.raw_config.get("burst_404_rate_limit", 4))
+        self.preventive_mitigation_file = str(self.raw_config.get("preventive_mitigation_file", "preventive_blacklist.txt"))
+
         # Ignored paths: list of URL substrings/prefixes exempt from 404/403 rate-limiting and repeat-attack bans
         self.ignored_paths: List[str] = [
             str(p).strip().lower() for p in self.raw_config.get("ignored_paths", []) if str(p).strip()

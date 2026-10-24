@@ -9,6 +9,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 from core.config import ConfigManager
 from core.models import AttackEvent, Rule
 from core.geoip import geoip_lookup
+from core.behavioral import EarlyStageReconEngine, ReconEvaluationResult
 
 # Rate-limit bookkeeping is bounded on purpose: a scanner rotating through
 # millions of source addresses would otherwise grow these dicts without limit.
@@ -25,6 +26,10 @@ class AttackDetector:
         self.config = config
         self.compiled_rules: List[Tuple[Rule, Optional[re.Pattern]]] = []
         self._compile_rules()
+
+        # Behavioral & Early-Stage Reconnaissance Engine
+        self.behavioral_enabled = getattr(config, "behavioral_defense_enabled", True)
+        self.recon_engine = EarlyStageReconEngine(config=config)
 
         # Sliding windows for rate limiting: IP -> deque of timestamps
         self.ip_404_history: Dict[str, Deque[float]] = collections.defaultdict(collections.deque)
@@ -73,6 +78,8 @@ class AttackDetector:
     def reload_rules(self) -> None:
         self.config.load()
         self._compile_rules()
+        self.behavioral_enabled = getattr(self.config, "behavioral_defense_enabled", True)
+        self.recon_engine = EarlyStageReconEngine(config=self.config)
 
     def reset_counters(self) -> None:
         """Reset all internal statistics counters."""
@@ -83,6 +90,7 @@ class AttackDetector:
         self.started_at = datetime.now()
         self.ip_404_history.clear()
         self.ip_403_history.clear()
+        self.recon_engine.reset()
 
     def analyze_request(
         self,
@@ -176,6 +184,34 @@ class AttackDetector:
         if any(bot in raw_lower for bot in crawler_signatures):
             is_crawler = True
 
+        # 1c. Proactive Early-Stage Reconnaissance & Behavioral Evaluation
+        recon_res = None
+        if self.behavioral_enabled and not is_crawler and not is_ignored_path:
+            recon_res = self.recon_engine.process_request(
+                ip=ip,
+                method=method,
+                url=url,
+                status_code=status_code,
+                raw_line=raw_line,
+                now=now,
+            )
+            if recon_res.should_ban_preventively:
+                self.total_attacks_detected += 1
+                primary_reason = recon_res.reasons[0] if recon_res.reasons else "Suspicion Score exceeded"
+                event = AttackEvent(
+                    ip=ip,
+                    method=method,
+                    url=url,
+                    status_code=status_code,
+                    matched_rule=f"Early Recon Mitigation: {primary_reason}",
+                    category=recon_res.category,
+                    raw_line=raw_line,
+                    source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
+                )
+                ban_reason = f"Proactive Recon Mitigation (Score: {recon_res.suspicion_score:.1f}) - {'; '.join(recon_res.reasons)}"
+                return event, True, ban_reason
+
         # 2. HTTP 403 Forbidden Access Handling (Default: Instant ban on 1st attempt!)
         if status_code == 403 and not is_crawler and not is_ignored_path:
             history = self.ip_403_history[ip]
@@ -253,6 +289,50 @@ class AttackDetector:
                     url=url,
                     status_code=status_code,
                     matched_rule=f"HTTP 404 Probe ({count}/{self.config.threshold_404})",
+                    category="probe",
+                    raw_line=raw_line,
+                    source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
+                )
+                return event, False, ""
+
+        # 4. Proactive Forensic & Early Recon Events (for non-404/403 requests)
+        if recon_res and recon_res.is_suspicious:
+            if recon_res.parameter_anomalies:
+                first_ano = recon_res.parameter_anomalies[0]
+                reason = first_ano.anomaly_reasons[0] if first_ano.anomaly_reasons else "Obfuscated payload"
+                event = AttackEvent(
+                    ip=ip,
+                    method=method,
+                    url=url,
+                    status_code=status_code,
+                    matched_rule=f"Structural Anomaly: {reason} in '{first_ano.param_name}'",
+                    category="structural_anomaly",
+                    raw_line=raw_line,
+                    source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
+                )
+                return event, False, ""
+            elif recon_res.journey_anomaly:
+                event = AttackEvent(
+                    ip=ip,
+                    method=method,
+                    url=url,
+                    status_code=status_code,
+                    matched_rule=f"User Journey Anomaly: {recon_res.journey_anomaly}",
+                    category="journey_anomaly",
+                    raw_line=raw_line,
+                    source_log=source_log,
+                    country=geoip_lookup.get_country(ip),
+                )
+                return event, False, ""
+            elif self.recon_engine.sliding_tracker.is_sensitive_probe(url):
+                event = AttackEvent(
+                    ip=ip,
+                    method=method,
+                    url=url,
+                    status_code=status_code,
+                    matched_rule="Sensitive File Recon Probe",
                     category="probe",
                     raw_line=raw_line,
                     source_log=source_log,
